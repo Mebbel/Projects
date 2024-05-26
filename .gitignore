@@ -9,3 +9,5 @@
 *.xlsb
 *.txt
 
+data/raw/eurostat
+
