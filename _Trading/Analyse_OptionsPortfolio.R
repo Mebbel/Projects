@@ -32,27 +32,16 @@
 
 
 
+# NOTES:
+
+# Need a better exit signal! Most trades turn a loss as the exit is too late!
+# Also, too many knockouts! Why?
+# -> could be a coding error!
+# -> track date of knockout!!!!
 
 
 
 
-
-
-
-
-
-# Notes 
-
-# Determine 100 day vs 30 day
-# If 30 day > 100 day -> keep buying long options
-# If 30 day < 100 day -> sell long options and buy short options
-
-# Infer relative differenfr from 30 to 100 days ->
-# -> Do not buy options any longer
-
-
-# Inspect moving averages on close / high / low etc.
-# -> moving average on high - low, etc.
 
 
 
@@ -100,12 +89,11 @@ df = tq_get(idx_list, from = "2000-01-01", to = Sys.Date() + 1)
 df = df %>%
     mutate(
         # close = close / head(close, n = 1),
-        close_ma_30 = TTR::SMA(close, n = 30),
-        close_ma_100 = TTR::SMA(close, n = 100)
+        sma_200_close = TTR::SMA(close, n = 30),
+        sma_200_low = TTR::SMA(low, n = 100)
     ) 
 
-tail(df) %>% View()
-
+tail(df)
 
 # Subset to train and testing
 df_train = df %>% filter(date < as.Date("2018-01-01"))
@@ -114,19 +102,19 @@ df_test = df %>% filter(date > as.Date("2018-01-01"))
 
 # Develop backtesting framework
 
-# 1] Whenever close_ma_30 > close_ma_100 -> buy long options
-# 2] Whenever close_ma_30 < close_ma_100 -> sell long options and buy short options
-
 
 
 
 df_orders = df_train %>% 
     mutate(
-        buy_long = if_else(close_ma_30 / close_ma_100 > 1.05, 1, 0),
-        buy_short = if_else(close_ma_30 / close_ma_100 < 0.95, 1, 0),
 
-        liquidate_long = if_else(close_ma_30 / close_ma_100 <= 0.99, 1, 0),
-        liquidate_short = if_else(close_ma_30 / close_ma_100 >= 1.01, 1, 0)
+        # Enter positions
+        buy_long = if_else(open > sma_200_close, 1, 0),
+        buy_short = if_else(open < sma_200_close, 1, 0),
+
+        # Liquidate positions
+        liquidate_long = if_else(close < sma_200_close, 1, 0),
+        liquidate_short = if_else(close > sma_200_close, 1, 0)
 
     )
 
@@ -134,147 +122,127 @@ df_orders = df_train %>%
 df_portfolio = tibble()
 
 # Long positions
-df_portfolio = bind_rows(
-    df_portfolio, 
-    df_orders %>% 
+df_portfolio_long = df_orders %>% 
         filter(buy_long == 1) %>%
-        select(date_buy = date, close_buy = close) %>%
+        select(date_buy = date, close_buy = close, barrier = sma_200_close) %>%
         mutate(type = "long")
-)
 
 # Short positions
-df_portfolio = bind_rows(
-    df_portfolio, 
-    df_orders %>% 
+df_portfolio_short = df_orders %>% 
         filter(buy_short == 1) %>%
-        select(date_buy = date, close_buy = close) %>%
+        select(date_buy = date, close_buy = close, barrier = sma_200_close) %>%
         mutate(type = "short")
-)
 
-# Assume holding the option for up to 30 days
-df_portfolio = df_portfolio %>%
+
+
+# For each position, determine if first liquidate condition is met or barrier is hit!
+
+# Dates for liquidation of long positions
+date_liquidate_long = df_orders %>% filter(liquidate_long == 1) %>% pull(date)
+
+df_portfolio_long["date_liquidate"] = NA
+df_portfolio_long["barrier_crit"] = NA
+
+for (i in 1:nrow(df_portfolio_long)) {
+
+    date_buy_i = df_portfolio_long[i,]$date_buy
+
+    date_liquidate_i = min(date_liquidate_long[date_liquidate_long > date_buy_i])
+
+    low_i = df_train %>%
+        filter(date >= date_buy_i & date < date_liquidate_i) %>%
+        pull(low) %>% min()
+
+    df_portfolio_long[i, "date_liquidate"] = date_liquidate_i
+    df_portfolio_long[i, "barrier_crit"] = low_i
+
+}
+
+date_liquidate_short = df_orders %>% filter(liquidate_short == 1) %>% pull(date)
+
+df_portfolio_short["date_liquidate"] = NA
+df_portfolio_short["barrier_crit"] = NA
+
+for (i in 1:nrow(df_portfolio_short)) {
+
+    date_buy_i = df_portfolio_short[i,]$date_buy
+
+    date_liquidate_i = min(date_liquidate_short[date_liquidate_short > date_buy_i])
+
+    high_i = df_train %>%
+        filter(date >= date_buy_i & date < date_liquidate_i) %>%
+        pull(high) %>% min()
+
+    df_portfolio_short[i, "date_liquidate"] = date_liquidate_i
+    df_portfolio_short[i, "barrier_crit"] = high_i
+
+}
+
+# Determine if barrier condition is met
+df_portfolio_long = df_portfolio_long %>%
+    mutate(knocked_out = if_else(barrier_crit < barrier, 1, 0))
+
+df_portfolio_short = df_portfolio_short %>%
+    mutate(knocked_out = if_else(barrier_crit > barrier, 1, 0))
+
+
+# Calculate holding period
+df_portfolio_long = df_portfolio_long %>% mutate(holding_period = date_liquidate - date_buy)
+df_portfolio_short = df_portfolio_short %>% mutate(holding_period = date_liquidate - date_buy)
+
+
+
+# Calculate profit and loss
+
+
+df_pl_long = df_portfolio_long %>%
+    # Add close price at liquidation date
+    left_join(df_train %>% select(date, close_sell = close), by = c("date_liquidate" = "date")) %>%
+    # Calculate profit
     mutate(
-        date_sell = date_buy + 360
-    )
+        cost = -100,
+        rev_pct = 1 + (close_sell - close_buy) / close_buy,
+        rev_pct = if_else(knocked_out == 1, 0, rev_pct), # If knocked out, no profit
+        profit = cost + (rev_pct * 100) # 100 shares
+    ) 
 
-# Add closing price at selling date
-df_portfolio = df_portfolio %>%
-    left_join(df_train %>% select(date, close_sell = close), by = c("date_sell" = "date")) %>%
-    # Carry forward last observation of close_sell
-    fill(close_sell, .direction = "down")
-
-# Liquidate positions
-# Need to check for each position in portfolio, if between date_buy and date_sell, the liquidate condition is met
-# -> take the first liquidate condition!
-
-df_liquidate_long = df_orders %>%
-    filter(liquidate_long == 1) %>%
-    select(date_liquidate_long = date, close_liquidate_long = close)
-
-df_liquidate_short = df_orders %>%
-    filter(liquidate_short == 1) %>%
-    select(date_liquidate_short = date, close_liquidate_short = close)
-
-
-df_liquidate_pf = df_portfolio %>%
-    rowwise() %>%
-    mutate(l_date = list(seq.Date(date_buy, date_sell, by = "days"))) %>%
-    select(date_buy, date_sell, l_date) %>%
-    unnest(l_date)
-
-df_liquidate_pf_long = df_liquidate_pf %>%    
-    left_join(
-        df_liquidate_long, by = c("l_date" = "date_liquidate_long")
-    ) %>%
-    drop_na(close_liquidate_long) %>%
-    group_by(date_buy) %>%
-    slice_head(n = 1)
-
-df_liquidate_pf_short = df_liquidate_pf %>%    
-    left_join(
-        df_liquidate_short, by = c("l_date" = "date_liquidate_short")
-    ) %>%
-    drop_na(close_liquidate_short) %>%
-    group_by(date_buy) %>%
-    slice_head(n = 1)
-
-df_portfolio = df_portfolio %>%
-    left_join(df_liquidate_pf_long %>% select(date_buy, date_liquidate_long = l_date, close_liquidate_long), by = c("date_buy" = "date_buy")) %>%
-    left_join(df_liquidate_pf_short %>% select(date_buy, date_liquidate_short = l_date, close_liquidate_short), by = c("date_buy" = "date_buy"))
-
-
-
-# TODO: Track cash management! Can only buy if I have cash!
-# -> Without cash management, cannot compare to simple buy-and-hold strategy!
-
-cash_init = 10000
-
-
-# Compare to base line
-# Buy shares everyday and hold until today
-df_base = df_train %>%
-    slice_head(n = 1) %>%
-    select(date_buy = date, close_buy = close) %>%
-    mutate(n = cash_init / close_buy) 
-
-# Sell at the end -> until then, track the NAV
-df_base =
-    df_train %>%
-    bind_cols(df_base) %>%
-        mutate(
-            pl_cum = n * (close - close_buy)
-        )
-
-
-# Calculate levered vs unlevered portfolio!
-# European vs barrier option!
-
-# Simple long-only unlevered portfolio
-
-df_portfolio %>%
-    filter(type == "long") %>%
-    arrange(date_buy) %>%
-    mutate(
-        # Calculate profit / loss
-        pl = case_when(
-            type == "long" & is.na(date_liquidate_long) ~ close_sell - close_buy,
-            type == "long" & !is.na(date_liquidate_long) ~ close_liquidate_long - close_buy,
-            type == "short" ~ 0
-        )
-    ) %>%
-    mutate(pl_cum = cumsum(pl)) %>%  
-    ggplot(aes(x = date_buy, y = pl_cum)) +
-        geom_line() +
-        geom_line(data = df_base, aes(x = date), color = "red") +
-        theme_minimal() +
-        geom_hline(yintercept = 0, color = "black") +
-        labs(title = "Cumulative profit / loss of long-only portfolio") +
-        scale_x_date(date_labels = "%Y-%m", date_breaks = "1 year") +
-        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+df_train %>%
+    left_join(df_pl_long, by = c("date" = "date_buy")) %>%
+    mutate(profit = if_else(is.na(profit), 0, profit)) %>%
+    mutate(profit_cum = cumsum(profit)) %>%
+    View()
+    ggplot(aes(x = date, y = profit_cum)) +
+    geom_line()
 
 
 
 
+# Calculate % profitable trades, knockouts and unprofitable trades
+df_pl_long %>%
+    mutate(case = case_when(
+        knocked_out == 1 ~ "knockout",
+        rev_pct > 1 ~ "profitable",
+        rev_pct < 1 ~ "loss",
+        TRUE ~ "open"
+    )) %>%
+    #count(case)
+    left_join(df_train %>% select(date, close, low, sma_200_close), .,  by = c("date" = "date_buy")) %>%
+    filter(year(date) == 2013) %>%
+    ggplot(aes(x = date, y = close)) + 
+    geom_line() +
+    geom_line(aes(y = low), color = "blue", linetype = 2) +
+    geom_line(aes(y = sma_200_close), color = "red") +
+    geom_jitter(aes(x = date_liquidate, y = close_buy, color = case), size = 3, na.rm = T)
+
+df_pl_long %>%
+ filter(year(date_buy) == 2013) %>%
+ filter()
+ filter(knocked_out == 1) %>%
+ head()
 
 
-df_orders %>%
-filter(date>= "2002-01-08") %>% View()
 
 
-
-# Testing!!!! -------------------------------------------------------------------------------------------------------
-
-
-
-
-df %>%
-filter(date > as.Date("2018-01-01")) %>%
-ggplot(aes(x = date, y = close)) +
-    geom_line() + 
-    geom_line(aes(y = close_ma_30), color = "red") +
-    geom_line(aes(y = close_ma_100), color = "blue") +
-    theme_minimal() +
-    labs(title = "30 day vs 100 day moving average")
 
 
 
