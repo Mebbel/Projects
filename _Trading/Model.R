@@ -89,6 +89,13 @@ df = df %>%
 
 # Calculate expected returns over n periods for buying a barrier option at the end of each day
 
+# Parameters:
+# call option: barrier in relation to sma_200_close_prev
+param_call_barrier = 0.8 # 100% of the sma_200_close_prev
+param_put_barrier = 1.2 # 120% of the sma_200_close_prev
+
+
+
 
 # Set period to 30 days
 df = df %>% 
@@ -99,41 +106,41 @@ df = df %>%
         # Calculate the expected return of a barrier option
         price_long_buy = map_dbl(close_prev, ~ calc_BarrierOption(
             x = .x,
-            strike = sma_200_close_prev, # Example strike price
+            strike = sma_200_close_prev * param_call_barrier, # Example strike price
             maturity = 99, # unlimited
-            barrier = sma_200_close_prev, # Example barrier
+            barrier = sma_200_close_prev * param_call_barrier, # Example barrier
             type = "call" # Call option
         )),
 
         price_short_buy = map_dbl(close_prev, ~ calc_BarrierOption(
             x = .x,
-            strike = sma_200_close_prev * 1.2, # Example strike price
+            strike = sma_200_close_prev * param_put_barrier, # Example strike price
             maturity = 99, # unlimited
-            barrier = sma_200_close_prev * 1.2, # Example barrier
+            barrier = sma_200_close_prev * param_put_barrier, # Example barrier
             type = "put" # Put option
         )),
 
         # Calculate the value after 30 days
         value_long_lead_30 = map_dbl(close_lead_30, ~ calc_BarrierOption(
             x = .x,
-            strike = sma_200_close_prev, # Example strike price
+            strike = sma_200_close_prev * param_call_barrier, # Example strike price
             maturity = 99, # unlimited
-            barrier = sma_200_close_prev, # Example barrier
+            barrier = sma_200_close_prev * param_call_barrier, # Example barrier
             type = "call" # Call option
         )),
 
         value_short_lead_30 = map_dbl(close_lead_30, ~ calc_BarrierOption(
             x = .x,
-            strike = sma_200_close_prev * 1.2, # Example strike price
+            strike = sma_200_close_prev * param_put_barrier, # Example strike price
             maturity = 99, # unlimited
-            barrier = sma_200_close_prev * 1.2, # Example barrier
+            barrier = sma_200_close_prev * param_put_barrier, # Example barrier
             type = "put" # Put option
         )),
 
         # Calculate the minimum price over the next 30 days
         # -> check whether the barrier is hit
-        barrier_long_crit = ifelse(low_lead_30 < sma_200_close_prev, 0, 1), # 0 if barrier is hit, 1 if not
-        barrier_short_crit = ifelse(high_lead_30 > (sma_200_close_prev * 1.2), 0, 1), # 0 if barrier is hit, 1 if not
+        barrier_long_crit = ifelse(low_lead_30 < sma_200_close_prev * param_call_barrier, 0, 1), # 0 if barrier is hit, 1 if not
+        barrier_short_crit = ifelse(high_lead_30 > (sma_200_close_prev * param_put_barrier), 0, 1), # 0 if barrier is hit, 1 if not
 
         # Return
         return_long_lead_30 = if_else(barrier_long_crit == 0, -1, (value_long_lead_30 - price_long_buy) / price_long_buy), # Return after 30 days,
@@ -142,7 +149,7 @@ df = df %>%
         return_cash_lead_30 = 0
     )
 
-summary(df)
+# summary(df)
 
 # Determine the best option for buy / sell / cash
 df = df %>%
@@ -198,14 +205,70 @@ df %>%
 # If above SMA 200 -> > 50% change of calling is the best action
 # -> so, if the close approachs the SMA 200 from below -> why not go long? because of the vola in the next days?
 
+# -> It all depends on param_call_barrier and param_put_barrier!
+# -> if the barrier is too close to the SMA 200 and the price is NOT above the SMA 200 -> then the chance of hitting the barrier is too high!
+
+# -> Determine the distance to barrier in relation to the SMA 200 ???? if above -> then smaller distance, if below -> larger distance
 
 # Histogram: close / sma_200_close -> call_perc / cash_perc / put_perc
 df %>%
     filter(between(year(date), 2000, 2024)) %>%
     mutate(rel_sma = close / sma_200_close) %>%
     ggplot(aes(x = rel_sma)) +
-    geom_histogram(bins = 100, aes(fill = action), color = "black", position = position_dodge()) +
-    theme_bw()
+    geom_histogram(bins = 100, aes(fill = action), color = "black", position = position_stack()) +
+    theme_bw() +
+    facet_wrap(~ symbol, scales = "free_y")
+
+
+df_buckets = df %>%
+    filter(between(year(date), 2000, 2024)) %>%
+    mutate(rel_sma = close / sma_200_close) %>%
+    mutate(rel_sma_floor = rel_sma %>% 
+           cut(breaks = seq(0, 2, by = 0.05), 
+               labels = paste0(seq(0, 1.9, by = 0.05), "-", seq(0.05, 2, by = 0.05)))) %>%
+    group_by(symbol, rel_sma_floor, action) %>%
+    summarise(n = n()) %>%
+    group_by(symbol, rel_sma_floor) %>%
+    mutate(pct = n / sum(n) * 100)
+
+
+# CHECK N OBS!!!
+
+df_buckets %>% 
+select(symbol, rel_sma_floor, action, pct) %>%
+filter(action == "call") %>%
+pivot_wider(names_from = symbol, values_from = pct, values_fill = 0) %>%
+print(n = 50)
+    
+
+df_buckets %>%
+    ggplot(aes(x= rel_sma_floor, y = pct)) +
+    geom_bar(aes(fill=action), stat = "identity") +
+    # geom_text(aes(label = paste0(round(pct, 0),"%")), 
+    #         colour="white", size=3.5, angle = 90, 
+    #         position = position_stack(vjust = 0.5)) +
+
+    # label bars with percentage in the center
+    labs(title = "Action Distribution by Relative SMA 200", 
+         x = "Relative SMA 200", 
+         y = "Percentage (%)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    facet_wrap(~ symbol, scales = "free")
+
+
+
+
+
+
+
+
+
+
+# close / sma_200_close ~ 120% -> appears to make sense to start building cash! -> 50:50
+# Otherwise, if close / sma_200_close in (100, 120%) -> DO NOT build cash! -> go long / short 60:40???
+
+# -> each index has a different cut-off!!!!
 
 
 
