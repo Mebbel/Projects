@@ -1,6 +1,27 @@
 # Estimate a model for predicting buying / selling
 
 
+
+
+# Notes
+# Model 1] Predict the action (buy / sell / cash) based on the features across all indices
+# Model 2] Risk Management: Predict volatility and risk of hitting a barrier
+# Model 3] Determine the strike / barrier in relation to SMA 200 
+
+# Agent 1] Train an agent to use all 3 models as tool. The Agent has a treasury model and has limited cash to invest.
+# The agent needs to decide on the model outputs what is the optimal action to take.
+
+# For action, use features like:
+# Pct Change, moments, etc. on SMA (10, 30, 50, 100, 200) on close / low / high / open / volume
+
+
+
+
+
+
+
+
+
 # Load libraries
 library(tidyverse)
 library(tidyquant)
