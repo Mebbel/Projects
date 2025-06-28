@@ -10,6 +10,10 @@ library(TTR)
 
 library(ggplot2)
 
+library(tidymodels)
+library(timetk)
+library(xgboost)
+
 # Custom functions
 calc_BarrierOption <- function(x, strike, maturity, barrier, type = "call") {
 
@@ -44,10 +48,10 @@ calc_BarrierOption <- function(x, strike, maturity, barrier, type = "call") {
 
 # Get historic index data
 idx_list = c(
-    "^NDX" # Nasdaq 100
-    # "^DJI" # Dow Jones
-    # "^GSPC" # SP 500
-    # "^GDAXI" # DAX
+    "^NDX", # Nasdaq 100
+    "^DJI", # Dow Jones
+    "^GSPC", # SP 500
+    "^GDAXI" # DAX
 )
 
 df = tq_get(idx_list, from = "2000-01-01", to = Sys.Date() + 1)
@@ -56,6 +60,9 @@ df = tq_get(idx_list, from = "2000-01-01", to = Sys.Date() + 1)
 
 # Close of previous day
 df = df %>%
+    drop_na("close") %>% # Remove rows with NA in close
+    group_by(symbol) %>%
+    arrange(date, .by_group = TRUE) %>% # Arrange by date within each symbol
     mutate(
         close_prev = lag(close, n = 1),
         close_lead_30 = lead(close, n = 30) # Close 30 days in the future
@@ -157,12 +164,66 @@ df %>%
     geom_point(data = df %>% filter(action == "call"), aes(y = close), color = "green", size = 2) + # Buy call option
     geom_point(data = df %>% filter(action == "put"), aes(y = close), color = "red", size = 2) + # Buy put option
     labs(title = "Barrier Option Strategy", x = "Date", y = "Close Price") +
+    theme_minimal() +
+    facet_wrap(~ symbol, scales = "free_y") # Facet by symbol
+
+
+# INspect periods where the close is above the 200 day moving average 
+# And the signal is sell!
+# -> Distance from 200 sma? if too high, then go short?! :) ?
+
+df_plt = df %>%
+    filter(between(year(date), 2006, 2009))
+
+df_plt %>%
+    ggplot(aes(x = date, y = close)) +
+    geom_line() +
+    geom_line(aes(y = sma_200_close), color = "blue") + # 200 day moving average
+    # geom_point(data = df %>% filter(action == "call"), aes(y = close), color = "green", size = 2) + # Buy call option
+    geom_point(data = df_plt %>% filter(action =="put"& close > sma_200_close), aes(y = close), color = "red", size = 2) + # Buy put option
+    labs(title = "Barrier Option Strategy", x = "Date", y = "Close Price") +
     theme_minimal()
+
+
+
+# Inspect % of actions in periods above the 200 SMA -> compared to periods where close < 200SMA
+df %>%
+    filter(between(year(date), 2000, 2024)) %>%
+    mutate(position = if_else(close > (sma_200_close), "above", "below")) %>%
+    count(symbol, position, action) %>%
+    pivot_wider(names_from = action, values_from = n, values_fill = 0) %>%
+    mutate(call_perc = call / (call + put + cash) * 100)
+
+# If below SMA 200 -> NEVER go long???
+# If above SMA 200 -> > 50% change of calling is the best action
+# -> so, if the close approachs the SMA 200 from below -> why not go long? because of the vola in the next days?
+
+
+# Histogram: close / sma_200_close -> call_perc / cash_perc / put_perc
+df %>%
+    filter(between(year(date), 2000, 2024)) %>%
+    mutate(rel_sma = close / sma_200_close) %>%
+    ggplot(aes(x = rel_sma)) +
+    geom_histogram(bins = 100, aes(fill = action), color = "black", position = position_dodge()) +
+    theme_bw()
+
 
 
 # Split into training and testing data
 df_train = df %>% filter(date < as.Date("2018-01-01"))
 df_test = df %>% filter(date > as.Date("2018-01-01"))
+
+
+
+
+# Model training
+# 1] Define features
+# 2] Run PCA - reduce feature space to relevant signals
+# 3] Determine optimal number of components
+# 4] Train model on PCA components -> Random Forest
+
+
+
 
 
 
