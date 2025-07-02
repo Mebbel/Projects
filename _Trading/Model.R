@@ -313,6 +313,120 @@ df_test = df %>% filter(date > as.Date("2018-01-01"))
 
 # Train model on predicted action!!!!
 
+library(tidymodels)
+library(xgboost)
+library(butcher)
+library(future)
 
+
+# Use bagging for predicting error bands
+
+# Collect bagging models
+l_models = list()
+length(l_models) = length(y_iter)
+
+# Start multisession
+future:plan(multisession, workers = 4)
+
+# Iterate over bagged models
+for (i in seq_along(y_iter)) {
+
+    print(i)
+
+    l_models[[i]] <- future({
+
+        # Subset to data for current iteration, i.e. bagged data
+        df_train_i = ...
+
+        # Create slider for cross validation
+        resamples = sliding_period(df_traini_i, slide_idx, period = "year", lookback = Inf)
+
+        # Define recipe
+        rec = recipe(action ~ ., data = df_train_i) %>%
+            update_role(action, new_role = "outcome") %>% # Set action as outcome
+            step_other(strategy, threshold = 0.01) %>% # Convert low frequency categories to "other"
+            step_novel(all_nominal_predictors()) %>% # Handle novel categories
+            step_unknown(all_nominal_predictors()) %>% # Handle unknown categories
+            step_dummy(all_nominal_predictors()) # Convert categorical variables to dummy variables
+        
+        # Define hyperparameter tuning
+        grid = grid_space_filling(
+            trees(range = c(100, 1000)),
+            tree_depth(),
+            learn_rate(),
+            min_n(),
+            loss_reduction(),
+            sample_size = sample_prop(range = c(0.5, 1.0)),
+            finalize(mtry(), df_train_i %>% select(-action)),
+            size = 10,
+            type = "any",
+            iter = 1000
+        )
+
+        # Define model
+        mod_tune = boost_tree(
+            mode = "classification",
+            engine = "xgboost",
+            trees = tune(),
+            tree_depth = tune(),
+            learn_rate = tune(),
+            min_n = tune(),
+            loss_reduction = tune(),
+            sample_size = tune(),
+            mtry = tune()
+        )
+
+        # Define workflow
+        wf = workflow() %>%
+            add_recipe(rec) %>%
+            add_model(mod_tune)
+
+        # Perform cross-validation
+        res = wf %>%
+            tune_grid(
+                resamples = resamples,
+                grid = grid,
+                metrics = metric_set(accuracy, roc_auc),
+                control = control_grid(save_pred = TRUE, verbose = TRUE)
+            )
+
+        # Select best hyperparameters
+        best_params = select_best(res, metric = "roc_auc")
+
+        # FInalize
+        wf_final = finalize_workflow(wf, best_params)
+
+        # Create final fit
+        fit_final = wf_final %>%
+            fit(data = df_train_i)
+
+        # Reduce size of model with butcher
+        fit_final = butcher(fit_final, verbose = FALSE)
+
+        # Store model results
+        fit_final
+
+    })
+
+}
+
+# Extract models from multisession objects
+l_models = future::value(l_models)
+
+# Catch potential errors
+for (i in seq_along(l_models)) {
+    if (inherits(l_models[[i]], "error")) {
+        message(paste("Error in model", i, ":", l_models[[i]]))
+        l_models[[i]] <- NULL # Remove error models
+    }
+}
+
+
+# Perform bagged prediction
+df_pred = lapply(l_models, function(mod_i){
+    predict(mod_i, new_data = df_test)
+})
+
+df_pred = bind_rows(df_pred, .id = "model_id") 
 
 
