@@ -75,19 +75,71 @@ range_dist = range(diff(log(df_price$close)), na.rm = TRUE) * 1.2
 
 price_diff = diff(log(df_price$close))
 
+
+# Perform grid search on GARCH
+
+# AIC: lower value = better fit
+# BIC: lower value = better fit
+
+# Define the grid of parameters
+p_values <- 1:3  # Possible values for p (ARCH order)
+q_values <- 1:3  # Possible values for q (GARCH order)
+
+# Initialize a data frame to store the results
+results <- data.frame(
+  p = integer(),
+  q = integer(),
+  AIC = numeric()
+)
+
+# Perform the grid search
+for (p in p_values) {
+  for (q in q_values) {
+    # Define the GARCH model specification
+    garch_spec <- ugarchspec(
+      variance.model = list(model = "sGARCH", garchOrder = c(p, q)),
+      mean.model = list(armaOrder = c(0, 0)),
+      distribution.model = "jsu"
+    )
+
+    # Fit the GARCH model
+    garch_fit <- ugarchfit(spec = garch_spec, data = price_diff)
+
+    if (garch_fit@fit$convergence == 0) {
+
+    # Calculate the AIC
+    aic_value <- infocriteria(garch_fit)[1]
+
+    # Store the results
+    results <- rbind(results, data.frame(p = p, q = q, AIC = aic_value))
+
+    }
+  }
+}
+
+# Print the results
+print(results)
+
+
+
+# Lévy-driven stochastic volatility models
+# Multi-fractal models
+
+
+
+
+
 # Define the GARCH model specification
 garch_spec <- ugarchspec(
   variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
   mean.model = list(armaOrder = c(0, 0)),
-  distribution.model = "norm"  # We will replace this with Lévy noise later
+  distribution.model = "jsu"  # We will replace this with Lévy noise later
 )
 
 # Fit the GARCH model
 garch_fit <- ugarchfit(spec = garch_spec, data = price_diff)
 
 
-# AIC: lower value = better fit
-# BIC: lower value = better fit
 
 
 
@@ -141,6 +193,12 @@ generate_cauchy_process <- function(x0,  N) {
     logdiff[outliers] = rcauchy(length(outliers), location = param_dist$estimate["location"], scale = param_dist$estimate["scale"])
     outliers = which(logdiff < range_dist[1] | logdiff > range_dist[2])
   }
+
+  # !!!!
+  stop("Rearrange logdiff until volaility clustering is similar to sp500!")
+  # -> Can probably skip garch then!!!
+  # !!!!
+
 
   for (t in 2:N) {
       
