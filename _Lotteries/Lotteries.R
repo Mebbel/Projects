@@ -14,12 +14,27 @@
 
 
 
-# 2] Fill out more than 1 field! -> Setup system -> spend 100€ per week
 
 # 3] Hypertune the layers!
 
+# 3.1 ] Build in separate code base? # -> for LSTM -> need different input tensor! (batch, timesteps, feature)
+# https://tensorflow.rstudio.com/guides/keras/working_with_rnns
+
+
+# 3.1] Compare to baseline! Draw random numbers!
+
+# 3.2.] Extend horizon to 3,4,5,6 months! -> also, feed more history! 5 years / 10 years
+# -> can spend 1.000€ for lotto + eurojackpot. How long can I play?
+
+# 3.3] Robustness of the model -> vary the seed? sizes? model?
+
+
 # 4] Save the model and apply it to the actual lottery numbers! and predict next set of numbers to play!
-# 5] Create blog and track spendings and payouts! -> show my commitment to the system
+
+# 5] Extend for Eurojackpot!
+
+# 6] Create blog and track spendings and payouts! -> show my commitment to the system
+# -> spend both on lott and eurojackpot! Track all spendings, numbers played, and payoffs!
 
 
 
@@ -31,6 +46,8 @@
 
 library(dplyr)
 library(tidyr)
+
+library(ggplot2)
 
 library(tidyverse)
 library(tensorflow)
@@ -144,16 +161,33 @@ y_test_sz = m_output_sz[!sample,,drop = F]
 
 
 
+# Optimize model architectures -> Grid Search
+
+# Relevant layers: 
+# RElevant activation functions: softmax, tanh, etc.
+# Additions: dropout? batch normalization? etc.
+
+
+# Status quo: linear model -> as there are no hidden layers
+# -> We want to predict autocorrelation
+# -> 1] Next layer = number of lottery numbers -> does this compress too much?
+# -> 2] Next layer = mix of periods and numbers to represent the autocorrelation
+# !!!! Note the results of each experiment !!!
+
 
 
 # Train model
 
+# Main Numbers
 model <- keras_model_sequential() %>%
-  layer_dense(units = ncol(y_train), activation = "softmax")
-
-model_sz <- keras_model_sequential() %>%
-  layer_dense(units = ncol(y_train_sz), activation = "softmax")
-
+  #layer_dense(units = floor(ncol(x_train) / 2)) %>% -> 0 accruracy
+  #layer_dense(units = n_periods_past * 2) %>% # might help
+  layer_dense(units = n_periods_past) %>% # duplicate layer Increases accuracy
+  layer_dense(units = n_periods_past) %>% # Increases accuracy
+  #layer_dense(units = 49) %>%  # does not yield additional value
+  #layer_dense(units = n_periods_past / 2) %>% # Makes it worse
+  #layer_dense(units = n_periods_past * 2) %>% # Increases accuracy
+  layer_dense(units = ncol(y_train), activation = "softmax") # -> 0.005 accuracy -> with potential to increase with more epochs
 
 model %>% compile(
   optimizer = "adam",
@@ -161,18 +195,33 @@ model %>% compile(
   metrics = "accuracy"
 )
 
+# Increase epochs with early stopping!
+model %>% fit(x_train, y_train, epochs = 10)
+model %>% evaluate(x_test, y_test) %>% print()
+
+
+
+# Superzahl
+model_sz <- keras_model_sequential() %>%
+  #layer_dense(units = n_periods_past) %>% # check -> does not help
+  layer_dense(units = ncol(y_train_sz), activation = "softmax")
+
+
 model_sz %>% compile(
   optimizer = "adam",
   loss =  "categorical_crossentropy",
   metrics = "accuracy"
 )
 
-
-model %>% fit(x_train, y_train, epochs = 5)
-model %>% evaluate(x_test, y_test)
-
 model_sz %>% fit(x_train_sz, y_train_sz, epochs = 5)
-model_sz %>% evaluate(x_test_sz, y_test_sz)
+model_sz %>% evaluate(x_test_sz, y_test_sz) %>% print()
+
+
+warning("TODO: Increase epochs - but with early-stopping!")
+
+
+
+
 
 
 
@@ -212,30 +261,66 @@ m_y_test_sz_split = lapply(1:n_periods_future, function(i) {
 # -> which method to use? 
 # 1] -> take the 7 most likely numbers and create all combinations of 6 numbers!
 # 2] maximize the number of possible combinations of 4!
+# -> we need a trade-off between relying on the models predictions and increasing the likelihood of getting 4 numbers correct!
 
-m_predict_split[[1]][1,]
+n_fields = 15
+
+calc_fields <- function(m) {
+  
+  # 8 most likely numbers
+  top_numbers = order(m, decreasing = T)[1:8]
+
+  # Take the 8 most likely numbers -> and split into 6 numbers
+  top_numbers_comb = combn(top_numbers, 6)
+
+  # Calculate the likelihood of each set
+  top_comb = apply(top_numbers_comb, 2, function(m_) {m[m_]}) %>%
+    colSums() %>%
+    order(., decreasing = T)
+
+  # Select top 15 sets
+  top_numbers_comb[,top_comb[1:15]]
+
+}
+
+calc_fields(m_predict_split[[1]][1,])
+
+
+# Take n_fields of most likely sets
 
 
 
 
 
-# Translate to actual set of 6 numbers
-m_predict_trans = lapply(m_predict_split, function(m) {apply(m, 1, function(x) order(x, decreasing = T)[1:6]) %>% t()})
+# Translate to actual set of 6 numbers -> take the 6 most likely numbers
+#m_predict_trans = lapply(m_predict_split, function(m) {apply(m, 1, function(x) order(x, decreasing = T)[1:6]) %>% t()})
+m_predict_trans = lapply(m_predict_split, function(m) {
+  # For each time period
+  lapply(1:nrow(m), function(i) {
+    calc_fields(m[i,])
+  })  
+})
+
 m_predict_sz_trans = lapply(m_predict_sz_split, function(m) {apply(m, 1, which.max)})
 
 y_test_trans = lapply(m_y_test_split, function(m) {apply(m, 1, function(x) order(x, decreasing = T)[1:6]) %>% t()})
 y_test_sz_trans = lapply(m_y_test_sz_split, function(m) {apply(m, 1, which.max)})
 
-
+# Determine number of correct numbers for each field in each period and each simulation
 m_correct_numbers = lapply(1:n_periods_future, function(i) {
 
-  lapply(1:nrow(m_predict_trans[[i]]), function(j) {
-    length(intersect(m_predict_trans[[i]][j,], y_test_trans[[i]][j,]))
-  }) %>% unlist() 
+  # for each period
+  lapply(1:length(m_predict_trans[[i]]), function(j) {
+    # for each field
+    apply(m_predict_trans[[i]][[j]], 2, function(x) {
+      length(intersect(x, y_test_trans[[i]][j,]))
+    })
+  }) %>% do.call("rbind", .)
 
 })
 
-m_correct_numbers = do.call("cbind", m_correct_numbers)
+# No longer possible with multiple fields in each period
+#m_correct_numbers = do.call("cbind", m_correct_numbers)
 
 
 m_correct_numbers_sz = lapply(1:n_periods_future, function(i) {
@@ -246,7 +331,7 @@ m_correct_numbers_sz = lapply(1:n_periods_future, function(i) {
 
 })
 
-m_correct_numbers_sz = do.call("cbind", m_correct_numbers_sz)
+# m_correct_numbers_sz = do.call("cbind", m_correct_numbers_sz)
 
 
 
@@ -264,9 +349,19 @@ m_correct_numbers_sz = do.call("cbind", m_correct_numbers_sz)
 # [pay_off, pay_off_sz]
 v_pay_off = c(0, 0, 0, 10, 40, 3300, 575000, 0, 0, 5, 21, 190, 10000, 9000000)
 
-m_correct_numbers_comb = m_correct_numbers + m_correct_numbers_sz * 7
+# For single field
+# m_correct_numbers_comb = m_correct_numbers + m_correct_numbers_sz * 7
+# m_pay_off = apply(m_correct_numbers_comb, 2, function(x) v_pay_off[x + 1])
 
-m_pay_off = apply(m_correct_numbers_comb, 2, function(x) v_pay_off[x + 1])
+# For multiple fields
+m_pay_off = lapply(1:n_periods_future, function(i) {
+  m_correct_numbers_comb = m_correct_numbers[[i]] + m_correct_numbers_sz[[i]] * 7
+  apply(m_correct_numbers_comb, 2, function(x) v_pay_off[x + 1])
+})
+
+# Aggregate payoffs across all future periods
+m_pay_off_total = do.call("cbind", m_pay_off)
+
 
 # Calculate the costs for playing
 # https://www.lotto-bayern.de
@@ -277,16 +372,34 @@ m_pay_off = apply(m_correct_numbers_comb, 2, function(x) v_pay_off[x + 1])
 
 
 #m_pay_off = v_pay_off[m_correct_numbers + 1]
-sprintf("Expected payoff: %.2f", mean(rowSums(m_pay_off) - 1.7 * n_periods_future) %>% round(.,2))
+sprintf("Expected payoff: %.2f", mean(rowSums(m_pay_off_total) - 18 * n_periods_future) %>% round(.,2))
 
 
 # What is the mean if we limit the payoffs from getting a 6! -> simulate a constant revenue stream
-sprintf("Expected payoff without jackpots: %.2f", mean(pmin(m_pay_off, 3300) - 1.7 * n_periods_future) %>% round(.,2))
+sprintf("Expected payoff without jackpots: %.2f", mean(pmin(m_pay_off_total, 3300) - 18 * n_periods_future) %>% round(.,2))
+
 
 
 # Calculate median value! and inspect distribution!
 # -> probability to make a profit! -> expected value might be misleading
-sprintf("Median payoff: %.2f", median(rowSums(m_pay_off) - 1.7 * n_periods_future) %>% round(.,2))
+sprintf("Median payoff: %.2f", median(rowSums(m_pay_off_total) - 18 * n_periods_future) %>% round(.,2))
+
+
+
+
+# Save the model
+save_model(model, "models/model_lotto.keras")
+save_model(model_sz, "models/model_lotto_sz.keras")
+
+
+# TODO: Compare to baseline!
+data.frame(
+  pay_off = rowSums(m_pay_off_total)
+) %>%
+ggplot(aes(x = pay_off)) +
+  stat_ecdf() +
+  #limit x axis range
+  xlim(0, 1000) # -> do this differently not to cut off the tail! and bias the message
 
 
 

@@ -23,6 +23,16 @@
 
 
 
+# BETTER! Train several models with xgboost on:
+# 1] Price changes -> predict optimal buy / sell for next quarters
+# -> this model will decide the allocation of the portfolio
+
+# 2] Volatility -> predict volatility by estimateing low vs high model 
+# -> this will be the model to determine the VaR of the portfolio
+# -> And decide when to hedge or liquidate positions
+
+# 
+
 
 
 
@@ -46,6 +56,7 @@
 
 
 
+
 library(tidyquant)
 library(tidyverse)
 library(ggplot2)
@@ -55,20 +66,26 @@ library(greeks)
 
 library(TTR)
 
+library(tidymodels)
+library(timetk)
+library(xgboost)
+# library(fable)
+# library(fabletools)
 
 
+
+
+# Need to train on several indices to avoid overfitting!
 idx_list = c(
-    "^NDX" # Nasdaq 100 #> profitable
-
+    "^NDX", # Nasdaq 100 #> profitable
 
     # "EUR=X" # NOT profitable.
 
     # "GC=F"
 
-
-    # "^DJI" # Dow Jones
-    # "^GSPC" # SP 500
-    # "^GDAXI" # DAX
+    "^DJI", # Dow Jones
+    "^GSPC", # SP 500
+    "^GDAXI" # DAX
 
     # NIKKEI? others?
 
@@ -87,6 +104,9 @@ df = tq_get(idx_list, from = "2000-01-01", to = Sys.Date() + 1)
 
 # Calculate 30 day moving average on close
 df = df %>%
+    drop_na("close") %>%
+    group_by(symbol) %>%
+    arrange(date, .by_group = T) %>%
     mutate(
         # close = close / head(close, n = 1),
         sma_200_close = TTR::SMA(close, n = 30),
@@ -100,10 +120,9 @@ df_train = df %>% filter(date < as.Date("2018-01-01"))
 df_test = df %>% filter(date > as.Date("2018-01-01"))
 
 
+
+
 # Develop backtesting framework
-
-
-
 
 df_orders = df_train %>% 
     mutate(

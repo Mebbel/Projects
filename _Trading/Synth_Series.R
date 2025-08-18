@@ -22,6 +22,7 @@ library(RQuantLib)
 library(greeks)
 
 library(MASS)
+library(tseries)
 
 
 
@@ -53,6 +54,7 @@ idx_list = c(
 # Get price data from yahoo finance
 df_price = tq_get(idx_list, from = "2000-01-01", to = Sys.Date() + 1)
 
+save(df_price, file = "df_price.RData")
 
 # 0] Measure cauchy distribution of price returns
 
@@ -70,7 +72,7 @@ range_dist = range(diff(log(df_price$close)), na.rm = TRUE) * 1.2
 
 # Levy
 # Load necessary libraries
-library(ggplot2)
+
 
 # Function to generate a Lévy Cauchy process
 generate_cauchy_process <- function(x0,  N) {
@@ -79,12 +81,20 @@ generate_cauchy_process <- function(x0,  N) {
   W <- numeric(N)
   W[1] <- x0
 
+  # Draw all random values at once
+  logdiff = rcauchy(N - 1, location = param_dist$estimate["location"], scale = param_dist$estimate["scale"])
+
+  # Draw new values for values which are oustide the range
+
+  outliers = which(logdiff < range_dist[1] | logdiff > range_dist[2])
+
+  while (length(outliers) > 0) {
+    logdiff[outliers] = rcauchy(length(outliers), location = param_dist$estimate["location"], scale = param_dist$estimate["scale"])
+    outliers = which(logdiff < range_dist[1] | logdiff > range_dist[2])
+  }
+
   for (t in 2:N) {
-
-    logdiff = rcauchy(1, location = param_dist$estimate["location"], scale = param_dist$estimate["scale"])
-    logdiff = pmin(pmax(logdiff, range_dist[1]), range_dist[2])
-
-    W[t] <- W[t-1] * (1 + logdiff)
+    W[t] <- W[t-1] * (1 + logdiff[t-1])
   }
 
   return(W)
@@ -92,11 +102,11 @@ generate_cauchy_process <- function(x0,  N) {
 
 # Parameters
 x0 <- df_price$close[1]  # Initial value
-N <- 2000  # Number of steps
+N <- 2000  # Number of steps 
 
 # Generate the Cauchy process
 # cauchy_process <- lapply(1:100, function(x) generate_cauchy_process(x0, N)) %>% bind_rows(.id = "Simulation")
-
+set.seed(1234)
 results_matrix = replicate(1000, generate_cauchy_process(x0, N), simplify = FALSE) %>%
   Reduce(cbind, .)
 
@@ -146,21 +156,23 @@ results_long = results_long %>%
   anti_join(df_moments %>% arrange(desc(skewness_diff)) %>% slice_head(n = 10), by = "id")
 
 
-# 1] Compare the distributions of price returns
+# 1] Compare the distributions of price returns -> make sure that the potentially small sample creates an entirely different distribution
 # Kolmogorov-Smirnov
+# H0: the distributions are the same
 
 price_diff = diff(log(df_price[1:N,]$close))
 
 df_ks_test = results_long %>%
-  group_by(id) %>%
+    group_by(id) %>%
     mutate(diff = log(value) - lag(log(value))) %>%
     filter(!is.na(diff)) %>%
+  
     summarise(
       ks_statistic = list(ks.test(diff, price_diff)$statistic),
       ks_p_value = list(ks.test(diff, price_diff)$p.value)
     ) %>%
-    unnest(ks_statistic, ks_p_value) %>%
-    filter(ks_p_value >= 0.025)
+    unnest(ks_statistic, ks_p_value) %>% 
+    filter(ks_p_value >= 0.025) # WE DO NOT want to reject the H0
     # arrange(desc(ks_p_value))
 
 results_long = results_long %>%
@@ -169,7 +181,28 @@ results_long = results_long %>%
 
 # 2] Autocorrealation
 # Durbin-Watson Test: tseries:dwtest
-# Ljung-Box Test: stats:Box.test
+# Ljung-Box Test: stats:Box.test # H0 = no autocorrelation
+
+# Check results for results of base series
+
+
+test_result_base <- Box.test(price_diff, lag = 10, type = "Ljung-Box")
+
+
+df_box_test = results_long %>%
+  group_by(id) %>%
+   mutate(diff = log(value) - lag(log(value))) %>%
+    filter(!is.na(diff)) %>%
+  summarise(
+    p_value = list(Box.test(diff, lag = 10, type = "Ljung-Box")$p.value),
+    statistic = list(Box.test(diff, lag = 10, type = "Ljung-Box")$statistic)
+  ) %>%
+  unnest(statistic, p_value) %>%
+  # remove values where the test staitstic deviates by more than 10% from the base series
+  filter(abs(statistic - test_result_base$statistic) / test_result_base$statistic < 0.1) 
+
+results_long = results_long %>%
+  semi_join(df_box_test, by = "id")
 
 
 
@@ -177,13 +210,27 @@ results_long = results_long %>%
 # Autocorrelation of Squared Returns:
 # Calculate the autocorrelation function (ACF) of the squared returns. High autocorrelation in the squared returns indicates strong volatility clustering.
 
+test_result_base <- Box.test(price_diff**2, lag = 10, type = "Ljung-Box")
+
+df_box_test = results_long %>%
+  group_by(id) %>%
+  mutate(diff = log(value) - lag(log(value))) %>%
+  filter(!is.na(diff)) %>%
+  summarise(
+    p_value = list(Box.test(diff**2, lag = 10, type = "Ljung-Box")$p.value),
+    statistic = list(Box.test(diff**2, lag = 10, type = "Ljung-Box")$statistic)
+  ) %>%
+  unnest(statistic, p_value) %>%
+  # remove values where the test staitstic deviates by more than 10% from the base series
+  filter(abs(statistic - test_result_base$statistic) / test_result_base$statistic < 0.1) 
+
+results_long = results_long %>%
+  semi_join(df_box_test, by = "id")
+
+
 
 # 4] Power Spectrum
 
-
-
-
-# x] Subset scenarios to relevant scenarios!!!
 
 
 
@@ -202,12 +249,8 @@ ggplot(results_long, aes(x = time, y = value, color = factor(id))) +
 
 
 
-# Measure quality criteria for synthetic series, i.e. define desired properties of the synthetic series:
-
-
-# Compare moments ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-
+# Save scenario results for input to model
+write.table(results_long, file = "synth_series.tsv")
 
 
 
@@ -216,6 +259,7 @@ ggplot(results_long, aes(x = time, y = value, color = factor(id))) +
 
 # 1] Probability of +-4% returns in next 30 days conditional on +-4% returns in last 30 days
 # -> Is this just a markov chain????
+# -> This is volitatlity clustering!
 
 
 
@@ -228,8 +272,7 @@ ggplot(results_long, aes(x = time, y = value, color = factor(id))) +
 
 
 
-
-
+stop("End of script!")
 
 
 
