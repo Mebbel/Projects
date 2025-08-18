@@ -24,6 +24,8 @@ library(greeks)
 library(MASS)
 library(tseries)
 
+library(rugarch)
+
 
 
 idx_list = c(
@@ -69,6 +71,51 @@ range_dist = range(diff(log(df_price$close)), na.rm = TRUE) * 1.2
 # 1] Levy process !!! -> cauchy + Auto regression + Fractional Brownian Motion (fBM) dependencies
 
 
+# Fit garch model - required for modelling of volatility clustering
+
+price_diff = diff(log(df_price$close))
+
+# Define the GARCH model specification
+garch_spec <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model = list(armaOrder = c(0, 0)),
+  distribution.model = "norm"  # We will replace this with Lévy noise later
+)
+
+# Fit the GARCH model
+garch_fit <- ugarchfit(spec = garch_spec, data = price_diff)
+
+
+# AIC: lower value = better fit
+# BIC: lower value = better fit
+
+
+
+
+mu = garch_fit@fit$coef[["mu"]]
+omega = garch_fit@fit$coef[["omega"]]
+alpha = garch_fit@fit$coef[["alpha1"]]
+beta = garch_fit@fit$coef[["beta1"]]
+
+
+# Iterate and backfeed at each step!
+
+# 1] Draw levy returns
+
+
+
+
+
+
+
+
+
+# 4] Check if the returns are of the correct scale of if we need to adjust 
+
+
+
+
+
 
 # Levy
 # Load necessary libraries
@@ -81,11 +128,13 @@ generate_cauchy_process <- function(x0,  N) {
   W <- numeric(N)
   W[1] <- x0
 
+  # Vola
+  vola <- numeric(N)
+
   # Draw all random values at once
   logdiff = rcauchy(N - 1, location = param_dist$estimate["location"], scale = param_dist$estimate["scale"])
 
   # Draw new values for values which are oustide the range
-
   outliers = which(logdiff < range_dist[1] | logdiff > range_dist[2])
 
   while (length(outliers) > 0) {
@@ -94,7 +143,17 @@ generate_cauchy_process <- function(x0,  N) {
   }
 
   for (t in 2:N) {
-    W[t] <- W[t-1] * (1 + logdiff[t-1])
+      
+    # 2] Model volalitily
+    vola[t] = omega + alpha * (logdiff[t-1] - mu)^2 + beta * vola[t-1]
+
+    # 3] Adjust levy returns by model volatility
+    # apply this volitality to the returns drawn from the cauch distribution
+    # returns[t] <- sqrt(volatility[t]) * levy_process[t]
+    logdiff[t] = sqrt(vola[t]) * logdiff[t]
+
+
+    W[t] <- W[t-1] * (1 + logdiff[t])
   }
 
   return(W)
@@ -126,34 +185,34 @@ results_long <- data.frame(
 
 # 0] Compare moments
 
-mean(df_price[1:N,]$close)
-var(df_price[1:N,]$close)
-skewness(df_price[1:N,]$close)
+# mean(df_price[1:N,]$close)
+# var(df_price[1:N,]$close)
+# skewness(df_price[1:N,]$close)
 
-# Calc moments of synth series
-df_moments = results_long %>%
-  group_by(id) %>%
-  arrange(time, .by_group = T) %>%
-  summarise(
-    mean = mean(value, na.rm = T),
-    median = median(value, na.rm = T),
-    var = var(value, na.rm = T),
-    skewness = skewness(value, na.rm = T)
-  )
+# # Calc moments of synth series
+# df_moments = results_long %>%
+#   group_by(id) %>%
+#   arrange(time, .by_group = T) %>%
+#   summarise(
+#     mean = mean(value, na.rm = T),
+#     median = median(value, na.rm = T),
+#     var = var(value, na.rm = T),
+#     skewness = skewness(value, na.rm = T)
+#   )
 
-# Identify largest diffs from base series
-df_moments = df_moments %>%
-  mutate(
-    mean_diff = abs(mean - mean(df_price[1:N,]$close)),
-    var_diff = abs(var - var(df_price[1:N,]$close)),
-    skewness_diff = abs(skewness - skewness(df_price[1:N,]$close))
-  )
+# # Identify largest diffs from base series
+# df_moments = df_moments %>%
+#   mutate(
+#     mean_diff = abs(mean - mean(df_price[1:N,]$close)),
+#     var_diff = abs(var - var(df_price[1:N,]$close)),
+#     skewness_diff = abs(skewness - skewness(df_price[1:N,]$close))
+#   )
 
-# For each measure, drop top 10 largest differences
-results_long = results_long %>%
-  anti_join(df_moments %>% arrange(desc(mean_diff)) %>% slice_head(n = 10), by = "id") %>%
-  anti_join(df_moments %>% arrange(desc(var_diff)) %>% slice_head(n = 10), by = "id") %>%
-  anti_join(df_moments %>% arrange(desc(skewness_diff)) %>% slice_head(n = 10), by = "id")
+# # For each measure, drop top 10 largest differences
+# results_long = results_long %>%
+#   anti_join(df_moments %>% arrange(desc(mean_diff)) %>% slice_head(n = 10), by = "id") %>%
+#   anti_join(df_moments %>% arrange(desc(var_diff)) %>% slice_head(n = 10), by = "id") %>%
+#   anti_join(df_moments %>% arrange(desc(skewness_diff)) %>% slice_head(n = 10), by = "id")
 
 
 # 1] Compare the distributions of price returns -> make sure that the potentially small sample creates an entirely different distribution
@@ -220,9 +279,9 @@ df_box_test = results_long %>%
     p_value = list(Box.test(diff**2, lag = 10, type = "Ljung-Box")$p.value),
     statistic = list(Box.test(diff**2, lag = 10, type = "Ljung-Box")$statistic)
   ) %>%
-  unnest(statistic, p_value) %>%
+  unnest(statistic, p_value) %>% 
   # remove values where the test staitstic deviates by more than 10% from the base series
-  filter(abs(statistic - test_result_base$statistic) / test_result_base$statistic < 0.1) 
+  filter(abs(statistic - test_result_base$statistic) / test_result_base$statistic < 0.5) 
 
 results_long = results_long %>%
   semi_join(df_box_test, by = "id")
@@ -240,7 +299,7 @@ results_long = results_long %>%
 # Plot the Cauchy process
 ggplot(results_long, aes(x = time, y = value, color = factor(id))) +
   geom_line() +
-  geom_line(data = df_price[1:N,], aes(x = 1:N, y = close), color = "black", size = 0.5) +
+  # geom_line(data = df_price[1:N,], aes(x = 1:N, y = close), color = "black", size = 0.5) +
   ggtitle('Lévy Cauchy Process') +
   xlab('Time') +
   ylab('Value') +
