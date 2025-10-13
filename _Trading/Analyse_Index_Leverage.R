@@ -19,7 +19,7 @@
 # When to go short / long?
 # If high value -> then exit all positions -> it is too risky for this strategy!!!
 # -> what constitues a high value? close / sma 200? sma 200 on high / low / close?
-
+# -> Can i perform a regression on (expected return vs close / sma200) to determine optimal long/cash/short weights?
 
 
 # Keep securities for max 30 days
@@ -33,7 +33,7 @@
 
 # Metrics
 # Check for consistency of profits -> categorize by origin (early sell, end of holding period, ....)
-# -> We do not want a strategy that generates profity only by chance
+# -> We do not want a strategy that generates profity only by chance and only in extreme market conditions!
 
 
 # Backtesting
@@ -115,7 +115,12 @@ leverage = (val_1 / val_0 - 1) / 0.01
 
 
 # Select single training data set
-data = l_data[["^NDX"]]
+data = l_data[["^NDX"]] # ^RUT
+
+
+# TODO: Cross-validation! Create several moving windows for training and testing!
+# -> NEVER mix time series! -> define legnth of train vs test window -> and shift n times!
+
 
 # Subset to first 5 years
 data_train = data %>% filter(date < "2015-01-01")
@@ -124,23 +129,44 @@ data_test = data %>% filter(date >= "2015-01-01")
 
 # Settings -> this will be a grid-search later on
 
-
+# Basic grid -> independent of T/F settings
 df_grid = expand.grid(
 
-    buy_leverage = seq(5, 10, by = 1), # desired leverage -> determines knockout
-    holding_period = seq(30, 60, by = 5), # days to hold the option
+    buy_leverage = seq(6, 9, by = 1), # desired leverage -> determines knockout
+    holding_period = seq(30, 60, by = 10), # days to hold the option
 
-    # TODO: Implement!
+    # Observe increased clustered vola
+    risk_n_days_signal_TF = c(TRUE, FALSE), # whether to use the risk signal or not
     risk_n_days_signal = 30,
     risk_n_days_signal_cutoff = seq(-0.04, -0.02, by = 0.01), # pct of days with >2% negative moves in last n days -> do not buy
-    risk_n_days_signal_threshold = seq(3, 6, by = 1), # number of days with >2% negative moves in last n days -> do not buy
+    risk_n_days_signal_threshold = seq(3, 4, by = 1), # number of days with >2% negative moves in last n days -> do not buy
 
-    # risk_n_days_signal_sma30_d1 =  -0.001, # number of days with negative sma30_deriv1 in last n days -> do not buy
-    # risk_n_sma30_deriv1_threshold = seq(20, 40, by = 5)  # number of days with negative sma30_deriv1 in last n days -> do not buy
+    # Observe potential trend changes
+    risk_local_max_TF = c(TRUE, FALSE), # whether to use the risk signal or not
     risk_local_max_window = 10,
-    risk_n_sma30_local_max_pct = seq(0.2, 0.4, by = 0.1)  # pct of days with local max in last n days -> do not buy
+    risk_local_max_sma30 = seq(0.2, 0.3, by = 0.1)  # pct of days with local max in last n days -> do not buy
+
 
 )
+
+
+# Remove unncessary iterations
+df_grid = bind_rows(
+    df_grid %>% filter(risk_n_days_signal_TF == TRUE),
+    df_grid %>% 
+        filter(risk_n_days_signal_TF == FALSE) %>%
+        group_by(across(-starts_with("risk_n_days_signal"))) %>%
+        slice_head(n = 1)
+)
+
+df_grid = bind_rows(
+    df_grid %>% filter(risk_local_max_TF == TRUE),
+    df_grid %>% 
+        filter(risk_local_max_TF == FALSE) %>%
+        group_by(across(-starts_with("risk_local_max"))) %>%
+        slice_head(n = 1)
+)
+
 
 # Add metrics
 df_grid$cum_revenue = NA
@@ -159,12 +185,15 @@ for (i in 1:nrow(df_grid)) {
     # Extract parameters
     buy_leverage = df_grid$buy_leverage[i]
     holding_period = df_grid$holding_period[i]
+
+    risk_n_days_signal_TF = df_grid$risk_n_days_signal_TF[i]
     risk_n_days_signal = df_grid$risk_n_days_signal[i]
     risk_n_days_signal_cutoff = df_grid$risk_n_days_signal_cutoff[i]
     risk_n_days_signal_threshold = df_grid$risk_n_days_signal_threshold[i]
     # risk_n_days_signal_sma30_d1 = df_grid$risk_n_days_signal_sma30_d1[i]
     # risk_n_sma30_deriv1_threshold = df_grid$risk_n_sma30_deriv1_threshold[i]
-    risk_n_sma30_local_max_pct = df_grid$risk_n_sma30_local_max_pct[i]
+    risk_local_max_TF = df_grid$risk_local_max_TF[i]
+    risk_local_max_sma30 = df_grid$risk_local_max_sma30[i]
     window_local_extrema = df_grid$risk_local_max_window[i]
     
 
@@ -197,6 +226,7 @@ for (i in 1:nrow(df_grid)) {
         mutate(risk_signal = 1) %>%
         select(symbol, date, risk_signal)
 
+
     # Count number of risk signals in last 30 days
     data_train = data_train %>%
         left_join(tmp_risk_signal, by = c("symbol", "date")) %>%
@@ -205,7 +235,7 @@ for (i in 1:nrow(df_grid)) {
     
     # If there are more than n risk signals -> do not buy
     data_train = data_train %>%
-        mutate(buy_n = ifelse(risk_signal_30d >= risk_n_days_signal_threshold, 0, buy_n)) %>%
+        mutate(buy_n = ifelse((risk_signal_30d >= risk_n_days_signal_threshold) & risk_n_days_signal_TF, 0, buy_n)) %>%
         mutate(buy_value = buy_n * buy_price)
 
 
@@ -301,7 +331,7 @@ for (i in 1:nrow(df_grid)) {
 
     # If there are more than n risk signals -> do not buy
     data_train = data_train %>%
-        mutate(buy_n = ifelse(sma30_local_max_pct >= risk_n_sma30_local_max_pct, 0, buy_n)) %>%
+        mutate(buy_n = ifelse((sma30_local_max_pct >= risk_local_max_sma30) & risk_local_max_TF, 0, buy_n)) %>%
         mutate(buy_value = buy_n * buy_price)
 
 
@@ -316,8 +346,29 @@ for (i in 1:nrow(df_grid)) {
 
         tmp_i = data_train[j:(j + 30),]
 
+
+        risk_n_days_signal_TF
+
+        risk_local_max_TF
+
         # Check all relevant risk models for first stop loss signal!
-        min_date_i = min(tmp_i[tmp_i$risk_signal_30d >= risk_n_days_signal_threshold | tmp_i$sma30_local_max_pct >= risk_n_sma30_local_max_pct,]$date)
+
+        if (risk_n_days_signal_TF & risk_local_max_TF) {
+
+             min_date_i = min(tmp_i[tmp_i$risk_signal_30d >= risk_n_days_signal_threshold | tmp_i$sma30_local_max_pct >= risk_local_max_sma30,]$date)
+
+        } else if (risk_n_days_signal_TF) {
+
+             min_date_i = min(tmp_i[tmp_i$risk_signal_30d >= risk_n_days_signal_threshold,]$date)
+
+        } else if (risk_local_max_TF) {
+
+             min_date_i = min(tmp_i[tmp_i$sma30_local_max_pct >= risk_local_max_sma30,]$date)
+
+        } else {
+            next
+        }
+    
 
         data_train[j,"sell_date_risk"] = if_else(is.na(min_date_i), as.Date(NA), as.Date(min_date_i))
 
@@ -383,6 +434,21 @@ stop("continue here")
 # -> i.e. given prolonged periods of losses -> what is the max drawdown I need to cover
 
 
+# Measure portfolio value! Maybe create trigger that cashes in if portfolio value accelerates too much or reached certain level!
+
+
+# Calculate annualized returns and vola of portfolio
+df_grid
+
+# Calculate year range from date column
+y_ = data_train$date %>% range() %>% diff()
+y_ = as.numeric(y_) / 365.25
+
+# How much money did I invest????
+# Might differ substantilly for each strategy! depending on drawdowns
+
+
+
 
 
 # Check distributions of cum_revenue vs max_drawdown!
@@ -391,7 +457,47 @@ stop("continue here")
 
 
 df_grid %>% 
-    tail()
+    arrange(desc(cum_revenue)) %>%
+    head()
+
+# 10x leverage delivers highest returns, but also largest vola of returns
+# -> 7-8x leverage seems optimal -> might be different for other indices!
+df_grid %>%
+    pivot_longer(cols = -c(cum_revenue, max_drawdown), names_to = "parameter", values_to = "value") %>%
+    ggplot(aes(x = value, y = cum_revenue)) +
+    geom_point() +
+    facet_wrap(~parameter, scales = "free_x")
+    
+# Optimal right now:
+# 7-8 leverage
+# 40 days holding period
+# NO risk_local_max
+# Yes risk_n_days with
+    # ??? -> 
+
+# Run linear regression with y = cum_Revenue and x = all parameters
+lm_fit = lm(cum_revenue ~ ., data = df_grid %>% select(-max_drawdown))
+summary(lm_fit)
+
+# risk_local_max_TFTRUE -> signifcant HIGHLY negabtive impact on cum_revenue
+
+# Calculate median values
+df_grid %>%
+    group_by(buy_leverage) %>%
+    summarise(median_cum_revenue = median(cum_revenue), median_max_drawdown = median(max_drawdown))
+
+df_grid %>%
+    group_by(holding_period) %>%
+    summarise(median_cum_revenue = median(cum_revenue), median_max_drawdown = median(max_drawdown))
+
+
+
+# Analyse in detail
+df_grid %>%
+    filter(buy_leverage == 8) %>%
+     group_by(risk_n_days_signal_threshold) %>%
+    summarise(median_cum_revenue = median(cum_revenue), median_max_drawdown = median(max_drawdown))
+
 
 
 
