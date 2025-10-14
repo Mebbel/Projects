@@ -16,6 +16,8 @@
 # -> % of +/-4% price changes in the last 30 days -> signla for high vola -> do not buy but sell!
 # ---> Put in relation to index vola -> higher vola = higher expected price changes! -> compute with rolling window? self-revealing index info?
 
+# On first knockout, or second knockout within n days -> liquiditate all long positions!
+
 # When to go short / long?
 # If high value -> then exit all positions -> it is too risky for this strategy!!!
 # -> what constitues a high value? close / sma 200? sma 200 on high / low / close?
@@ -126,32 +128,71 @@ data = l_data[["^NDX"]] # ^RUT
 data_train = data %>% filter(date < "2015-01-01")
 data_test = data %>% filter(date >= "2015-01-01")   
 
+stop("Implement cross-validation! with moving windows of n (=5?) years and evaluate on next 2 years!")
+# Collect metrics for training and test for each window!
+
 
 # Settings -> this will be a grid-search later on
 
-# Basic grid -> independent of T/F settings
-df_grid = expand.grid(
+grid_settings = list(
+    buy_leverage = c(5, 10),
+    holding_period = c(30, 100),
 
-    # General settings
-    buy_leverage = seq(3, 9, by = 1), # desired leverage -> determines knockout
-    holding_period = seq(30, 60, by = 10), # days to hold the option
-    # liquidity_inv_perc = 0.05, # Percent of available liquidity to invest daily
+    liquidity_inv_perc = c(0.05, 0.2), # Percent of available liquidity to invest daily
+
+     # Observe increased clustered vola
+    risk_n_days_signal_TF = c(TRUE), #c(TRUE, FALSE), # whether to use the risk signal or not
+    risk_n_days_signal = c(10, 30),
+    risk_n_days_signal_cutoff = c(-0.03, -0.015), # negative < x% moves
+    risk_n_days_signal_threshold = c(2, 10) # number of days with <x% negative moves in last n days -> do not buy
+
+    )
+
+# Check number of elements with two values
+grid_n_expand = lapply(grid_settings, function(x) length(x) > 1) %>% unlist() %>% sum()
+
+# Define length of grid
+grid_length = 500
+
+# Given the grid_length and the number of elements to expand -> define how many values to sample for each parameter
+grid_n_samples = floor(grid_length^(1 / grid_n_expand))
+
+grid_expand = lapply(grid_settings, function(x) if (length(x) > 1) seq(min(x), max(x), length.out = grid_n_samples) else x)
+
+df_grid = expand.grid(grid_expand)
+
+# Transform day values to integers
+df_grid = df_grid %>%
+    mutate(across(c(holding_period, risk_n_days_signal, risk_n_days_signal_threshold), as.integer))
+
+
+
+
+# # Basic grid -> independent of T/F settings
+# df_grid = expand.grid(
+
+#     # General settings
+#     buy_leverage = 5, #seq(3, 9, by = 1), # desired leverage -> determines knockout
+#     holding_period = seq(50, 100, by = 10), # days to hold the option
+#     # liquidity_inv_perc = 0.05, # Percent of available liquidity to invest daily
 
     
 
-    # Observe increased clustered vola
-    risk_n_days_signal_TF = TRUE, #c(TRUE, FALSE), # whether to use the risk signal or not
-    risk_n_days_signal = seq(20, 30, by = 5),
-    risk_n_days_signal_cutoff = seq(-0.04, -0.01, by = 0.01), # pct of days with >2% negative moves in last n days -> do not buy
-    risk_n_days_signal_threshold = seq(3, 6, by = 1) # number of days with >2% negative moves in last n days -> do not buy
+#     # Observe increased clustered vola
+#     risk_n_days_signal_TF = TRUE, #c(TRUE, FALSE), # whether to use the risk signal or not
+#     risk_n_days_signal = seq(10, 30, by = 10),
+#     risk_n_days_signal_cutoff = seq(-0.04, -0.02, by = 0.01), # pct of days with >2% negative moves in last n days -> do not buy
+#     risk_n_days_signal_threshold = seq(2, 10, by = 2) # number of days with >2% negative moves in last n days -> do not buy
 
-    # Observe potential trend changes -> reduce revenues significantly
-    #risk_local_max_TF = c(TRUE, FALSE), # whether to use the risk signal or not
-    #risk_local_max_window = 10,
-    #risk_local_max_sma30 = seq(0.2, 0.3, by = 0.1)  # pct of days with local max in last n days -> do not buy
+#     # Observe potential trend changes -> reduce revenues significantly
+#     #risk_local_max_TF = c(TRUE, FALSE), # whether to use the risk signal or not
+#     #risk_local_max_window = 10,
+#     #risk_local_max_sma30 = seq(0.2, 0.3, by = 0.1)  # pct of days with local max in last n days -> do not buy
 
 
-)
+# )
+
+# Create stochastic grid! i.e. define length of grid and interpolate each parameter given the defined range
 
 
 # Remove unncessary iterations
@@ -187,6 +228,12 @@ liquidity_init = 10000
 
 # stop("Code is too slow. Refactor with matrices!!! + date_ids, i.e. indicaes for events")
 
+# library(profvis)
+
+# profvis({
+
+
+
 for (i in 1:nrow(df_grid)) {
 
     print(paste0("Running grid ", i, " of ", nrow(df_grid)))
@@ -196,7 +243,7 @@ for (i in 1:nrow(df_grid)) {
     # Extract parameters
     buy_leverage = df_grid$buy_leverage[i]
     holding_period = df_grid$holding_period[i]
-    # liquidity_inv_perc = df_grid$liquidity_inv_perc[i]
+    liquidity_inv_perc = df_grid$liquidity_inv_perc[i]
 
     risk_n_days_signal_TF = df_grid$risk_n_days_signal_TF[i]
     risk_n_days_signal = df_grid$risk_n_days_signal[i]
@@ -210,7 +257,7 @@ for (i in 1:nrow(df_grid)) {
 
 
     # Calculate liquidity inv perc in relation to holding period + 10 days buffer
-    liquidity_inv_perc = 1 / (holding_period + 10)
+    # liquidity_inv_perc = 1 / (holding_period + 10)
 
 
     # Calculate signals
@@ -275,10 +322,10 @@ for (i in 1:nrow(df_grid)) {
     m_positions = matrix(
         0,
         nrow = nrow(data_train),
-        ncol = 9
+        ncol = 13
     )
 
-    colnames(m_positions) = c("buy_date", "buy_price", "buy_n", "knockout", "sell_date", "sell_price", "sell_n", "default", "status")
+    colnames(m_positions) = c("buy_date", "buy_price", "buy_n", "buy_value", "knockout", "sell_date", "sell_price", "sell_value", "sell_n", "default", "status", "profit", "return")
 
     
 
@@ -297,10 +344,10 @@ for (i in 1:nrow(df_grid)) {
 
        
 
-        # Minimum size of position : 100€
-        if (v_liquidity[j - 1] < 100) {
-            next
-        }
+        # # Minimum size of position : 100€
+        # if (v_liquidity[j - 1] < 100) {
+        #     next
+        # }
 
 
 
@@ -374,8 +421,16 @@ for (i in 1:nrow(df_grid)) {
                 m_positions[j,"status"] = 0
             } else {
                 # Sold by risk model first
+
+
+
                m_positions[j,"sell_date"] = j + min(sell_date_risk) - 1
-               m_positions[j,"sell_price"] = data_train[m_positions[j,"sell_date"],]$buy_price
+
+                # Get close at sell date
+                close_sell = data_train[m_positions[j,"sell_date"],]$close
+                # Get knockout from buy date
+                m_positions[j, "sell_price"] = calc_BarrierOption(x = close_sell, strike = m_positions[j,"knockout"], maturity = 99, barrier = m_positions[j,"knockout"]) / 10^3
+
                m_positions[j,"sell_n"] = m_positions[j,"buy_n"]
                m_positions[j,"default"] = 0
                m_positions[j,"status"] = 0
@@ -385,7 +440,12 @@ for (i in 1:nrow(df_grid)) {
         } else if (length(sell_date_risk) != 0) {
 
             m_positions[j,"sell_date"] = j + min(sell_date_risk) - 1
-            m_positions[j,"sell_price"] = data_train[m_positions[j,"sell_date"],]$buy_price
+
+                # Get close at sell date
+                close_sell = data_train[m_positions[j,"sell_date"],]$close
+                # Get knockout from buy date
+                 m_positions[j, "sell_price"] = calc_BarrierOption(x = close_sell, strike = m_positions[j,"knockout"], maturity = 99, barrier = m_positions[j,"knockout"]) / 10^3
+
             m_positions[j,"sell_n"] = m_positions[j,"buy_n"]
             m_positions[j,"default"] = 0
             m_positions[j,"status"] = 0
@@ -393,7 +453,11 @@ for (i in 1:nrow(df_grid)) {
         # Normal sell after holding period
         } else {
             m_positions[j,"sell_date"] = j + holding_period
-            m_positions[j,"sell_price"] = data_train[m_positions[j,"sell_date"],]$buy_price
+            # Get close at sell date
+            close_sell = data_train[m_positions[j,"sell_date"],]$close
+            # Get knockout from buy date
+             m_positions[j, "sell_price"] = calc_BarrierOption(x = close_sell, strike = m_positions[j,"knockout"], maturity = 99, barrier = m_positions[j,"knockout"]) / 10^3
+
             m_positions[j,"sell_n"] = m_positions[j,"buy_n"]
             m_positions[j,"default"] = 0
             m_positions[j,"status"] = 0
@@ -401,56 +465,45 @@ for (i in 1:nrow(df_grid)) {
 
         }
 
+        # Calculate revenue
+        m_positions[j, "buy_value"] = m_positions[j,"buy_n"] * m_positions[j,"buy_price"]
+        m_positions[j, "sell_value"] = m_positions[j,"sell_n"] * m_positions[j,"sell_price"]
+        m_positions[j, "profit"] = m_positions[j,"sell_value"] - m_positions[j,"buy_value"]
+        m_positions[j, "return"] = ifelse(m_positions[j,"buy_value"] == 0, 0, m_positions[j,"profit"] / m_positions[j,"buy_value"])
+
+
         # Update liquidity
-        v_liquidity[j] = v_liquidity[j - 1] - m_positions[j,"buy_n"] * m_positions[j,"buy_price"] + m_positions[j,"sell_n"] * m_positions[j,"sell_price"]
+        v_liquidity[j] = (
+            v_liquidity[j - 1] 
+            - m_positions[j,"buy_value"] 
+        )
+
+        # Check if there any sales on the current date
+        if (j %in% m_positions[,"sell_date"]) {
+            v_liquidity[j] = v_liquidity[j] + sum(m_positions[m_positions[,"sell_date"] == j, "sell_value"], na.rm = TRUE)
+        }
 
     }
 
 
+    # Calculate performance metrics
+
+    # Define the risk free rate
+    risk_free_rate = 0.03
 
 
-    # # Sell options after holding period
-    # data_train = data_train %>% 
-    #     mutate(sell_date = date + holding_period) %>%
-    #     # Sell earlier if risk model triggers
-    #     mutate(sell_date = if_else(!is.na(sell_date_risk) & sell_date_risk < sell_date, sell_date_risk, sell_date)) %>%
-    #     left_join(data_train %>% select(date, sell_close = close), by = c("sell_date" = "date")) %>%
-    #     # Carry forward na values for sell_close
-    #     fill(sell_close, .direction = "down") %>%
-    #     fill(sell_close, .direction = "up") %>%
-    #     rowwise() %>%
-    #     mutate(sell_price = calc_BarrierOption(x = sell_close, strike = knockout, maturity = 99, barrier = knockout)) %>%
-    #     ungroup()
+    # Sharpe ratio
+    # The Sharpe ratio measures the risk-adjusted return of a portfolio by comparing the excess return over the risk-free rate to the standard deviation of the portfolio's return.
+        
+    sd(v_liquidity, na.rm = TRUE)
 
 
+    # Sortino ratio
+    # The Sortino ratio is similar to the Sharpe ratio but only considers downside deviation (negative volatility) rather than total volatility.
 
+    # Information Ratio
+    # The Information Ratio measures the portfolio's returns relative to a benchmark, adjusted for risk.
 
-
-
-    # Determine the lowest low price during holdin period -> and check if knockout was reached
-    # tmp_low_roll = data_train %>%
-    #     # Use a rolling window approach
-    #     mutate(low_roll = zoo::rollapply(low, width = holding_period, FUN = min, align = "right", fill = NA)) %>%
-    #     select(date, low_roll)
-
-    # data_train = data_train %>%
-    #     left_join(tmp_low_roll, by = c("sell_date" = "date")) %>%
-    #     # Carry forward na values for sell_close
-    #     fill(low_roll, .direction = "down")
-
-    # # Determine profit
-    # data_train = data_train %>%
-    #     mutate(revenue = ifelse(low_roll <= knockout, -buy_value, buy_n * sell_price - buy_value))
-
-    # Calculate cumulative profit
-    # data_train = data_train %>%
-    #     drop_na(revenue) %>%
-    #     mutate(cum_revenue = cumsum(revenue))
-
-    # # Calculate max drawdown
-    # data_train = data_train %>%
-    #     mutate(cum_revenue_max = cummax(cum_revenue)) %>%
-    #     mutate(drawdown = cum_revenue - cum_revenue_max) 
 
 
     # Collect metrics
@@ -462,6 +515,10 @@ for (i in 1:nrow(df_grid)) {
 
 
 }
+
+# })
+
+# plot(log(v_liquidity))
 
 
 stop("continue here")
@@ -491,24 +548,32 @@ y_ = as.numeric(y_) / 365.25
 
 # How much money did I invest????
 # Might differ substantilly for each strategy! depending on drawdowns
-stop("Measure liquidity managgement!")
+
 # -> start with initial cash! Can I sustain the strategy? Or do I default?
 # -> what is the default probability given a certain set of parameters?
 
 df_grid$avg_return = (df_grid$liquidity_final / liquidity_init)^(1 / y_) - 1
 
 
+# Compare to bench mark return
+bench_return = (data_train[nrow(data_train),]$close / data_train[1,]$close)^(1 / y_) - 1
+
 # Check distributions of cum_revenue vs max_drawdown!
 # -> interpolate grid search to find optimal parameters!
 # ????#
 
-
+# Currently at ~20% yearly return!
 df_grid %>% 
+    cbind(bench_return = bench_return) %>%
     # Limit drawdowns -> TODO: find more sensible measure!
     # filter(max_drawdown > -10^5) %>%
+    mutate(d_ret_bench = avg_return - bench_return) %>%
     # Sort by max profits
     arrange(desc(liquidity_final)) %>%
-    head()
+    head(n = 20)
+
+# The current optimum is just 2% over the bench!!!
+
 
 
 # 10x leverage delivers highest returns, but also largest vola of returns
@@ -527,8 +592,16 @@ df_grid %>%
     # ??? -> 
 
 # Run linear regression with y = cum_Revenue and x = all parameters
-lm_fit = lm(cum_revenue ~ ., data = df_grid %>% select(-max_drawdown))
+lm_fit = lm(liquidity_final ~ ., data = df_grid %>% select(-max_drawdown, -cum_revenue, -avg_return) )
 summary(lm_fit)
+
+
+# Train random forest model or similar
+# -> Find important variables and predict best set of parameters for maximizing avg_return!
+# -> then update the grid -> estimate model -> repeat!
+stop("Train the model and dynamically update the grid!")
+# Is this reinforcement learning???
+
 
 # risk_local_max_TFTRUE -> signifcant HIGHLY negabtive impact on cum_revenue
 
