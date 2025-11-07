@@ -23,11 +23,17 @@
 # -> what constitues a high value? close / sma 200? sma 200 on high / low / close?
 # -> Can i perform a regression on (expected return vs close / sma200) to determine optimal long/cash/short weights?
 
+# -> Wenn long knockout - go short
 
 # Keep securities for max 30 days
 # -> determine probability of X days of reaching n% variance -> if knockout is (1-10%) * price -> then take max 5% risk that within X days the knockout is reached
 
 # Sell security early if underlying increased by 10% (take profit)
+
+
+# Min x% portfolio = short
+
+
 
 
 # How to account for intraday variance? High vs low prices
@@ -52,6 +58,13 @@
 
 # Set console width
 options(width = 400)
+
+
+
+# Portfolio settings
+liquidity_init = 10000
+
+
 
 
 
@@ -125,8 +138,19 @@ data = l_data[["^NDX"]] # ^RUT
 
 
 # Subset to first 5 years
-data_train = data %>% filter(date < "2015-01-01")
-data_test = data %>% filter(date >= "2015-01-01")   
+df_train = data %>% filter(date < "2015-01-01")
+df_test = data %>% filter(date >= "2015-01-01")   
+
+
+# Recode to matrices for faster processing
+df_train$date = 1:nrow(df_train)
+df_train$symbol = NULL
+
+df_test$date = 1:nrow(df_test)
+df_test$symbol = NULL
+
+m_train = as.matrix(df_train)
+m_test = as.matrix(df_test)
 
 stop("Implement cross-validation! with moving windows of n (=5?) years and evaluate on next 2 years!")
 # Collect metrics for training and test for each window!
@@ -140,8 +164,8 @@ grid_settings = list(
 
     liquidity_inv_perc = c(0.05, 0.2), # Percent of available liquidity to invest daily
 
-     # Observe increased clustered vola
-    risk_n_days_signal_TF = c(TRUE), #c(TRUE, FALSE), # whether to use the risk signal or not
+    # Observe increased clustered vola
+    risk_n_days_signal_TF = c(1), #c(TRUE, FALSE), # whether to use the risk signal or not
     risk_n_days_signal = c(10, 30),
     risk_n_days_signal_cutoff = c(-0.03, -0.015), # negative < x% moves
     risk_n_days_signal_threshold = c(2, 10) # number of days with <x% negative moves in last n days -> do not buy
@@ -197,293 +221,296 @@ df_grid = df_grid %>%
 
 # Remove unncessary iterations
 df_grid = bind_rows(
-    df_grid %>% filter(risk_n_days_signal_TF == TRUE),
+    df_grid %>% filter(risk_n_days_signal_TF == 1),
     df_grid %>% 
-        filter(risk_n_days_signal_TF == FALSE) %>%
+        filter(risk_n_days_signal_TF == 0) %>%
         group_by(across(-starts_with("risk_n_days_signal"))) %>%
         slice_head(n = 1)
 )
 
-# df_grid = bind_rows(
-#     df_grid %>% filter(risk_local_max_TF == TRUE),
-#     df_grid %>% 
-#         filter(risk_local_max_TF == FALSE) %>%
-#         group_by(across(-starts_with("risk_local_max"))) %>%
-#         slice_head(n = 1)
-# )
-
-# Print size of grid
-print(paste0("Grid size: ", nrow(df_grid)))
-
 # Add metrics
-df_grid$cum_revenue = NA
-df_grid$max_drawdown = NA
+
 df_grid$liquidity_final = NA
 
 
-data_train_base = data_train
 
-liquidity_init = 10000
+m_grid = as.matrix(df_grid)
 
 
-# stop("Code is too slow. Refactor with matrices!!! + date_ids, i.e. indicaes for events")
-
-# library(profvis)
-
-# profvis({
+# Print size of grid
+print(paste0("Grid size: ", nrow(m_grid)))
 
 
 
-for (i in 1:nrow(df_grid)) {
+# Define objects for backtesting -------------------------------------------------
 
-    print(paste0("Running grid ", i, " of ", nrow(df_grid)))
 
-    data_train = data_train_base
+## Portfolio Positions ------------------------------------------------------------
+
+# Holds all portfolio positions
+
+m_positions = matrix(
+    0,
+    nrow = nrow(data_train) * 2, # Allow for both long + short position each day
+    ncol = 14
+)
+
+
+colnames(m_positions) = c("buy_date", "buy_price", "buy_n", "buy_value", "knockout", "type", "sell_date", "sell_price", "sell_value", "sell_n", "default", "status", "profit", "return")
+
+
+## Portfolio Liquidity ------------------------------------------------------------
+
+# Track the liquidity management, incl. current cash, total invested, portfolio value, total value
+
+m_portfolio = matrix(
+    0,
+    nrow = nrow(data_train) + 1,
+    ncol = 7
+)
+
+# bop = beginning of period, eop = end of period
+
+colnames(m_portfolio) = c("date", "cash_bop", "cash_eop", "invested_value", "portfolio_value", "total_value", "period_revenue")
+
+
+
+
+## Date vector ------------------------------------------------------------
+
+# Iterator
+v_date = m_train[,"date"]
+
+
+
+
+
+## Add init values -------------------------------------------------------------
+m_portfolio[,"date"] = c(0, v_date)
+
+m_portfolio[1, "cash_bop"] = liquidity_init
+
+
+
+for (i in 1:nrow(m_grid)) {
+
+    print(paste0("Running grid ", i, " of ", nrow(m_grid)))
 
     # Extract parameters
-    buy_leverage = df_grid$buy_leverage[i]
-    holding_period = df_grid$holding_period[i]
-    liquidity_inv_perc = df_grid$liquidity_inv_perc[i]
+    buy_leverage = m_grid[i, "buy_leverage"]
+    holding_period = m_grid[i, "holding_period"]
+    liquidity_inv_perc = m_grid[i, "liquidity_inv_perc"]
 
-    risk_n_days_signal_TF = df_grid$risk_n_days_signal_TF[i]
-    risk_n_days_signal = df_grid$risk_n_days_signal[i]
-    risk_n_days_signal_cutoff = df_grid$risk_n_days_signal_cutoff[i]
-    risk_n_days_signal_threshold = df_grid$risk_n_days_signal_threshold[i]
-    # risk_n_days_signal_sma30_d1 = df_grid$risk_n_days_signal_sma30_d1[i]
-    # risk_n_sma30_deriv1_threshold = df_grid$risk_n_sma30_deriv1_threshold[i]
-    # risk_local_max_TF = df_grid$risk_local_max_TF[i]
-    # risk_local_max_sma30 = df_grid$risk_local_max_sma30[i]
-    # window_local_extrema = df_grid$risk_local_max_window[i]
+    risk_n_days_signal_TF = m_grid[i, "risk_n_days_signal_TF"]
+    risk_n_days_signal = m_grid[i, "risk_n_days_signal"]
+    risk_n_days_signal_cutoff = m_grid[i, "risk_n_days_signal_cutoff"]
+    risk_n_days_signal_threshold = m_grid[i, "risk_n_days_signal_threshold"]
+    # risk_n_days_signal_sma30_d1 = m_grid[i, "risk_n_days_signal_sma30_d1"]
+    # risk_n_sma30_deriv1_threshold = m_grid[i, "risk_n_sma30_deriv1_threshold"]
+    # risk_local_max_TF = m_grid[i, "risk_local_max_TF"]
+    # risk_local_max_sma30 = m_grid[i, "risk_local_max_sma30"]
+    # window_local_extrema = m_grid[i, "window_local_extrema"]
 
 
     # Calculate liquidity inv perc in relation to holding period + 10 days buffer
     # liquidity_inv_perc = 1 / (holding_period + 10)
 
 
-    # Calculate signals
-    
-    # Risk Managemnt -> if daily change < -2% in last 30 days -> do not buy and liquidate all positions
-    # TODO: determine relative to index vola -> i.e. quantile of daily changes -> take 1% or something
-    tmp_risk_signal = data_train %>%
-        arrange(date) %>%
-        mutate(daily_return = (close - lag(close)) / lag(close)) %>%
-        filter(daily_return <= risk_n_days_signal_cutoff) %>%
-        mutate(risk_signal = 1) %>%
-        select(symbol, date, risk_signal)
+    # Perform vectorized calculations ------------------------------------------------------------
+
+    ## Daily diff in close prices
+    m_train = cbind(m_train, d_close = c(NA, (m_train[2:nrow(m_train),"close"] / m_train[,"close"][-nrow(m_train)]-1)))
 
 
-    # Count number of risk signals in last 30 days
-    data_train = data_train %>%
-        left_join(tmp_risk_signal, by = c("symbol", "date")) %>%
-        # count number of risk_signals in last 30 days
-        mutate(risk_signal_30d = zoo::rollapply(risk_signal, width = risk_n_days_signal, FUN = function(x) sum(x, na.rm = TRUE), align = "right", fill = NA, partial = T))
+    # Iterables ------------------------------------------------------------
+
+    # Portfolio positions
+    p = 1
 
 
-    # This will be inefficient, as I need to loop over all rows -> but should be ok for now
-    data_train$sell_date_risk = as.Date(NA)
+    # Iterate over training data
 
-    for (j in 1:(nrow(data_train) - 30)) {
-
-        tmp_i = data_train[j:(j + 30),]
-
-        # Check all relevant risk models for first stop loss signal!       
-        if (risk_n_days_signal_TF) {
-
-             min_date_i = min(tmp_i[tmp_i$risk_signal_30d >= risk_n_days_signal_threshold,]$date)
-
-        } else {
-            next
-        }    
-
-        data_train[j,"sell_date_risk"] = if_else(is.na(min_date_i), as.Date(NA), as.Date(min_date_i))
-
-    }
-    
-
-    # Build infrastructure -> buy 1 option every day if conditions are met
-    data_train = data_train %>% 
-        # Determine desired knockout level
-        mutate(knockout = (1 - 1 / buy_leverage) * close) %>%
-        # Calculate price of the option
-        rowwise() %>%
-        mutate(buy_price = calc_BarrierOption(x = close, strike = knockout, maturity = 99, barrier = knockout) / 10^3) %>%
-        ungroup()
+    for (j in v_date) {
 
 
-    # Calculate liqudity and buy / sell positions
+        # Set cash at beginning of period ----------------------------------------------------------------------------------------------------------------------------
 
-
-
-
-
-    # Create objects for backtesting
-
-    # 1] m_positions: holds all positions and keeps track of open / closed positions
-    m_positions = matrix(
-        0,
-        nrow = nrow(data_train),
-        ncol = 13
-    )
-
-    colnames(m_positions) = c("buy_date", "buy_price", "buy_n", "buy_value", "knockout", "sell_date", "sell_price", "sell_value", "sell_n", "default", "status", "profit", "return")
-
-    
-
-
-    # 2] v_date: check for risk_signals
-    v_date = data_train$date
-
-    # 3] v_liquidity: holds current liquidity
-    v_liquidity <- numeric(nrow(data_train))
-    v_liquidity[1] <- liquidity_init
-
-
-    # !!! At each iteration, we need to recalculate buying and selling prices
-
-    for (j in 2:nrow(data_train)) {
-
-       
-
-        # # Minimum size of position : 100€
-        # if (v_liquidity[j - 1] < 100) {
-        #     next
-        # }
-
-
-
-        # Buy -----------------------------------------------------------------------------
-
-
-
-        # Check risk signals
-        if (data_train[j - 1 , "risk_signal_30d"] > risk_n_days_signal_threshold) {
-
-            # Do not buy
-            m_positions[j,"buy_date"] = j
-            m_positions[j,"buy_price"] = data_train[j,]$buy_price
-            m_positions[j,"knockout"] = data_train[j,]$knockout
-            m_positions[j, "buy_n"] = 0
-            m_positions[j,"status"] = 0
-
-        } else {
-
-          
-            # Determine how much to buy in current period
-            buy_value_j = (v_liquidity[j-1]) * liquidity_inv_perc
-
-            # Determine buy price of current period
-            m_positions[j,"buy_date"] = j
-            m_positions[j,"buy_price"] = data_train[j,]$buy_price
-            m_positions[j,"knockout"] = data_train[j,]$knockout
-            m_positions[j,"status"] = 1
-
-            # Buy as usual
-            m_positions[j, "buy_n"] = floor(buy_value_j / m_positions[j,"buy_price"])
-
-
+        if (j > 1) {
+            m_portfolio[j,"cash_bop"] = m_portfolio[j - 1,"cash_eop"]
         }
-
-
-        # Sell -----------------------------------------------------------------------------
-
-        # Determine what will happen to the current position
-
-        # If nothing was bought -> skip
-        if (m_positions[j,"buy_n"] != 0) {
-
-        # Determine earliest knockout date until holding period
-        knockout_dates = which(data_train[j:(j + holding_period),]$low < m_positions[j,"knockout"])
-
-        # Determine risk model sell date
-        sell_date_risk = data_train[j:(j + holding_period),]$sell_date_risk
-        sell_date_risk = which(!is.infinite(sell_date_risk))
-
-
-        # Possible knockout scenarios
-        if (length(knockout_dates) != 0) {
-
-            # No risk model sell date -> pure knockout
-            if (length(sell_date_risk) == 0) {
-                # Knocked out first
-                m_positions[j,"sell_date"] = j + min(knockout_dates) - 1
-                m_positions[j,"sell_price"] = 0
-                m_positions[j,"sell_n"] = m_positions[j,"buy_n"]
-                m_positions[j,"default"] = 1
-                m_positions[j,"status"] = 0
-
-            # There is a risk model, but knockout happens first
-            } else if (min(knockout_dates) > min(sell_date_risk, na.rm = TRUE)) {
-                # Knocked out first
-                m_positions[j,"sell_date"] = j + min(knockout_dates) - 1
-                m_positions[j,"sell_price"] = 0
-                m_positions[j,"sell_n"] = m_positions[j,"buy_n"]
-                m_positions[j,"default"] = 1
-                m_positions[j,"status"] = 0
-            } else {
-                # Sold by risk model first
+        
 
 
 
-               m_positions[j,"sell_date"] = j + min(sell_date_risk) - 1
+        # Risk models ----------------------------------------------------------------------------------------------------------------------------
 
-                # Get close at sell date
-                close_sell = data_train[m_positions[j,"sell_date"],]$close
-                # Get knockout from buy date
-                m_positions[j, "sell_price"] = calc_BarrierOption(x = close_sell, strike = m_positions[j,"knockout"], maturity = 99, barrier = m_positions[j,"knockout"]) / 10^3
+    
+       
+        # Risk Managemnt -> if daily change < -2% in last 30 days -> do not buy and liquidate all positions
+        # count number of risk_signals in last 30 days
 
-               m_positions[j,"sell_n"] = m_positions[j,"buy_n"]
-               m_positions[j,"default"] = 0
-               m_positions[j,"status"] = 0
+        # Make sure to observe only changes from end of previous period. Close price of period j is not known at time of decision making!
+        count_n_days_signal_cutoff = length(which(m_train[pmax(1, j - risk_n_days_signal):pmax(1, (j - 1)), "d_close"] <= risk_n_days_signal_cutoff))
+
+
+        # If this risk model is enabled
+        if (risk_n_days_signal_TF == 1) {
+
+            # Sell all open positions if threshold is exceeded
+
+            if (count_n_days_signal_cutoff >= risk_n_days_signal_threshold) {
+
+                m_positions[m_positions[,"status"] == 1 & m_positions[,"buy_date"] <= j, "sell_date"] = j
+
             }
 
-        # No knockout, but possible risk scenario
-        } else if (length(sell_date_risk) != 0) {
+        }
 
-            m_positions[j,"sell_date"] = j + min(sell_date_risk) - 1
 
-                # Get close at sell date
-                close_sell = data_train[m_positions[j,"sell_date"],]$close
-                # Get knockout from buy date
-                 m_positions[j, "sell_price"] = calc_BarrierOption(x = close_sell, strike = m_positions[j,"knockout"], maturity = 99, barrier = m_positions[j,"knockout"]) / 10^3
 
-            m_positions[j,"sell_n"] = m_positions[j,"buy_n"]
-            m_positions[j,"default"] = 0
-            m_positions[j,"status"] = 0
+        # Buy Positions ----------------------------------------------------------------------------------------------------------------------------
 
-        # Normal sell after holding period
+        # Only buy of there is no risk signals
+
+        if (risk_n_days_signal_TF == 1 & count_n_days_signal_cutoff >= risk_n_days_signal_threshold) {
+            # Do not buy
         } else {
-            m_positions[j,"sell_date"] = j + holding_period
-            # Get close at sell date
-            close_sell = data_train[m_positions[j,"sell_date"],]$close
+            # Buy as usual
+
+            # Determine how much to buy in current period
+            buy_value_j = m_portfolio[j, "cash_bop"] * liquidity_inv_perc
+
+            # Determine knockout for given leverage and close
+            knockout_j = (1 - 1 / buy_leverage) * m_train[j,"close"]
+
+            # Determine buy price
+            buy_price_j = calc_BarrierOption(x = m_train[j,"close"], strike = knockout_j, maturity = 99, barrier = knockout_j) / 10^3
+
+            # Buy position
+            m_positions[p,"buy_date"] = j
+            m_positions[p,"buy_price"] = buy_price_j
+            m_positions[p,"knockout"] =knockout_j
+            m_positions[p,"status"] = 1
+
+            # Buy as usual
+            m_positions[p, "buy_n"] = floor(buy_value_j / m_positions[p,"buy_price"])
+
+            # Calculate value
+            m_positions[p, "buy_value"] = m_positions[p,"buy_n"] * m_positions[p,"buy_price"]
+
+            # Increment position iterator
+            p = p + 1
+
+
+
+
+        }
+
+
+        # Check knockout of positions ----------------------------------------------------------------------------------------------------------------------------
+
+        # For all active positions, check if they are knocked out in current period j
+        # Assume that I am not lucky enough to sell them in period j before knockout happens!
+        # Set default = 1 if knocked out
+        m_positions[m_positions[,"status"] == 1 & m_positions[,"buy_date"] <= j & m_train[j, "low"] <= m_positions[,"knockout"], "default"] = 1
+
+        # Set status of all defaulted positions to 0
+        m_positions[m_positions[,"default"] == 1 & m_positions[,"status"] == 1, "status"] = 0
+
+
+
+        # Sell due to risk models ----------------------------------------------------------------------------------------------------------------------------
+
+        if (risk_n_days_signal_TF == 1 & count_n_days_signal_cutoff >= risk_n_days_signal_threshold) {
+
+            # Sell all open positions
+            m_positions[m_positions[,"status"] == 1 & m_positions[,"buy_date"] <= j, "sell_date"] = j
+
+            # Sell at lowest price of the day
+            for (s in which(m_positions[,"sell_date"] == j & m_positions[,"status"] == 1)) {
+
+                # Get knockout from buy date
+                m_positions[s, "sell_price"] = calc_BarrierOption(x =  m_train[j, "low"], strike = m_positions[s,"knockout"], maturity = 99, barrier = m_positions[s,"knockout"]) / 10^3
+
+                m_positions[s,"sell_n"] = m_positions[s,"buy_n"]
+                m_positions[s,"default"] = 0
+                m_positions[s,"status"] = 0
+
+                m_positions[s, "sell_value"] = m_positions[s,"sell_n"] * m_positions[s,"sell_price"]
+
+                m_positions[s, "profit"] = m_positions[s,"sell_value"] - m_positions[s,"buy_value"]
+
+
+            }         
+
+
+        }
+
+
+
+
+        # Sell due to holding period ----------------------------------------------------------------------------------------------------------------------------
+
+
+        # Sell all open positions of certain age
+        m_positions[m_positions[,"status"] == 1 & m_positions[,"buy_date"] == (j - holding_period), "sell_date"] = j
+
+        # Sell at lowest price of the day
+        for (s in which(m_positions[,"sell_date"] == j & m_positions[,"status"] == 1)) {
+
             # Get knockout from buy date
-             m_positions[j, "sell_price"] = calc_BarrierOption(x = close_sell, strike = m_positions[j,"knockout"], maturity = 99, barrier = m_positions[j,"knockout"]) / 10^3
+            m_positions[s, "sell_price"] = calc_BarrierOption(x =  m_train[j, "low"], strike = m_positions[s,"knockout"], maturity = 99, barrier = m_positions[s,"knockout"]) / 10^3
 
-            m_positions[j,"sell_n"] = m_positions[j,"buy_n"]
-            m_positions[j,"default"] = 0
-            m_positions[j,"status"] = 0
-        }
-
-        }
-
-        # Calculate revenue
-        m_positions[j, "buy_value"] = m_positions[j,"buy_n"] * m_positions[j,"buy_price"]
-        m_positions[j, "sell_value"] = m_positions[j,"sell_n"] * m_positions[j,"sell_price"]
-        m_positions[j, "profit"] = m_positions[j,"sell_value"] - m_positions[j,"buy_value"]
-        m_positions[j, "return"] = ifelse(m_positions[j,"buy_value"] == 0, 0, m_positions[j,"profit"] / m_positions[j,"buy_value"])
+            m_positions[s,"sell_n"] = m_positions[s,"buy_n"]
+            m_positions[s,"default"] = 0
+            m_positions[s,"status"] = 0
 
 
-        # Update liquidity
-        v_liquidity[j] = (
-            v_liquidity[j - 1] 
-            - m_positions[j,"buy_value"] 
-        )
+            m_positions[s, "sell_value"] = m_positions[s,"sell_n"] * m_positions[s,"sell_price"]
 
-        # Check if there any sales on the current date
-        if (j %in% m_positions[,"sell_date"]) {
-            v_liquidity[j] = v_liquidity[j] + sum(m_positions[m_positions[,"sell_date"] == j, "sell_value"], na.rm = TRUE)
-        }
+            m_positions[s, "profit"] = m_positions[s,"sell_value"] - m_positions[s,"buy_value"]
+
+
+        }         
+
+
+        # Update portfolio status ----------------------------------------------------------------------------------------------------------------------------
+
+        # Cash at the end of period, is cash at the beginning + sales - buys
+        m_portfolio[j,"cash_eop"] = m_portfolio[j,"cash_bop"] + sum(m_positions[m_positions[,"sell_date"] == j, "sell_value"], na.rm = TRUE) - sum(m_positions[m_positions[,"buy_date"] == j, "buy_value"], na.rm = TRUE)
+
+        # Calculate period revenue
+        m_portfolio[j,"period_revenue"] = sum(m_positions[m_positions[,"sell_date"] == j, "sell_value"], na.rm = TRUE) 
+
+        # TODO: Track portfolio values, etc. 
+
 
     }
+
+    # In last period, sell all assets
+
+    m_positions[m_positions[,"status"] == 1, "sell_date"] = j
+
+    # Sell at lowest price of the day
+    for (s in which(m_positions[,"sell_date"] == j & m_positions[,"status"] == 1)) {
+
+        # Get knockout from buy date
+        m_positions[s, "sell_price"] = calc_BarrierOption(x =  m_train[j, "low"], strike = m_positions[s,"knockout"], maturity = 99, barrier = m_positions[s,"knockout"]) / 10^3
+
+        m_positions[s,"sell_n"] = m_positions[s,"buy_n"]
+        m_positions[s,"default"] = 0
+        m_positions[s,"status"] = 0
+
+        m_positions[s, "sell_value"] = m_positions[s,"sell_n"] * m_positions[s,"sell_price"]
+
+        m_positions[s, "profit"] = m_positions[s,"sell_value"] - m_positions[s,"buy_value"]
+
+
+    }
+
+    # Update final cash
+    m_portfolio[j,"cash_eop"] = m_portfolio[j,"cash_bop"] + sum(m_positions[m_positions[,"sell_date"] == j, "sell_value"], na.rm = TRUE) - sum(m_positions[m_positions[,"buy_date"] == j, "buy_value"], na.rm = TRUE)
+
 
 
     # Calculate performance metrics
@@ -495,7 +522,7 @@ for (i in 1:nrow(df_grid)) {
     # Sharpe ratio
     # The Sharpe ratio measures the risk-adjusted return of a portfolio by comparing the excess return over the risk-free rate to the standard deviation of the portfolio's return.
         
-    sd(v_liquidity, na.rm = TRUE)
+    # sd(v_liquidity, na.rm = TRUE)
 
 
     # Sortino ratio
@@ -511,12 +538,12 @@ for (i in 1:nrow(df_grid)) {
     # df_grid[i, ]$cum_revenue = tail(data_train$cum_revenue, 1)
     # df_grid[i, ]$max_drawdown = min(data_train$drawdown, na.rm = TRUE)
 
-    df_grid[i,]$liquidity_final = tail(v_liquidity, n = 1)
+    m_grid[i, "liquidity_final"] = m_portfolio[j,"cash_eop"]
 
 
 }
 
-# })
+
 
 # plot(log(v_liquidity))
 
@@ -531,7 +558,7 @@ stop("continue here")
 
 
 # Calculate annualized returns and vola of portfolio
-df_grid
+df_grid = as.data.frame(m_grid)
 
 
 # Compare to base index returns! #> want to have at least 4-5x returns! at not much higher vola! Sharp? and similar
