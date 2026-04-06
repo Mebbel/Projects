@@ -2,7 +2,7 @@
 renv/library/
 renv/staging/
 
-# Output plots (generated artefacts)
+# Output plots (generated artifacts)
 output/
 
 # Data files (raw lottery data)

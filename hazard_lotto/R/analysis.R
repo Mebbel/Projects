@@ -20,14 +20,15 @@
 
 set.seed(42)
 
-file_lottery <- "../data/lottery.xlsx"    # path to optional real data file
-output_dir   <- "../output"              # where to save plots
+file_lottery <- here::here("data", "lottery.xlsx")  # path to optional real data file
+output_dir   <- here::here("output")                # where to save plots
 
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
 
 # Libraries -------------------------------------------------------------------
 
+library(here)
 library(dplyr)
 library(tidyr)
 library(lubridate)

@@ -45,6 +45,7 @@ hazard_lotto/
 
 | Package    | Purpose                          |
 |------------|----------------------------------|
+| here       | Project-root-relative paths      |
 | dplyr      | Data wrangling                   |
 | tidyr      | Reshaping data                   |
 | lubridate  | Date handling                    |
